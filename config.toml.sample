@@ -18,6 +18,13 @@ database = "listmonk"
 ssl_mode = "disable"
 max_open = 25
 max_idle = 25
+
+# Under auth_mode = "azure_managed_identity" this also bounds how long a
+# connection outlives the token it was opened with. The token is validated when
+# the connection is established, not per query, so a long-lived connection is
+# not broken by its token expiring — but recycling well inside the token's
+# roughly one-hour lifetime keeps that from being something to reason about.
+# Setting 0 (unlimited) is what would make it worth thinking through.
 max_lifetime = "300s"
 
 # Optional space separated Postgres DSN params. eg: "application_name=listmonk gssencmode=disable"
@@ -30,6 +37,13 @@ params = ""
 #                            server that has password authentication disabled.
 #                            Leave `password` empty and set `user` to the
 #                            database role bound to the identity.
+#
+# NOTE that "azure_managed_identity" additionally REQUIRES an ssl_mode of
+# require, verify-ca or verify-full, and refuses to start otherwise. The token
+# is the credential and travels as the DSN password, so an unencrypted
+# connection would put a bearer token on the wire — replayable for its lifetime
+# against a server that by definition accepts tokens. The `disable` default
+# above is fine for a password on a trusted network and is not fine here.
 auth_mode = "password"
 
 # Client ID of a user-assigned managed identity to authenticate as. Leave empty

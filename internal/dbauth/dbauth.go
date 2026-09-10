@@ -16,6 +16,7 @@ import (
 	"database/sql"
 	"database/sql/driver"
 	"fmt"
+	"os"
 	"strings"
 	"time"
 
@@ -39,6 +40,11 @@ const azurePostgresTokenScope = "https://ossrdbms-aad.database.windows.net/.defa
 // indefinitely. IMDS normally answers in well under a second, so this only
 // bounds failure.
 const azureTokenRequestTimeout = 30 * time.Second
+
+// Bounds the startup ping. Generous enough for a token mint plus a TLS
+// handshake to a private endpoint, short enough that a dropped route fails the
+// revision instead of hanging it.
+const connectTimeout = 30 * time.Second
 
 // tokenCredential is the part of azcore.TokenCredential this package needs,
 // declared locally so tests can substitute a fake.
@@ -91,9 +97,31 @@ func quoteDSNValue(v string) string {
 	return "'" + strings.NewReplacer(`\`, `\\`, `'`, `\'`).Replace(v) + "'"
 }
 
+// resolveClientID picks the managed identity to authenticate as, preferring
+// the explicit setting and falling back to AZURE_CLIENT_ID.
+//
+// The fallback is not a convenience. ManagedIdentityCredential does NOT read
+// AZURE_CLIENT_ID — that is DefaultAzureCredential behaviour — so with neither
+// set it silently resolves the host's *system-assigned* identity. A Container
+// App with only user-assigned identities has none, so the failure is an
+// unhelpful IMDS error at startup rather than anything naming the cause.
+//
+// AZURE_CLIENT_ID is also exactly how the surrounding estate selects an
+// identity for passwordless Postgres, so honouring it is what makes the
+// house pattern work rather than fail confusingly.
+func resolveClientID(clientID string) string {
+	if clientID != "" {
+		return clientID
+	}
+
+	return strings.TrimSpace(os.Getenv("AZURE_CLIENT_ID"))
+}
+
 // newAzureCredential builds the credential used to mint database tokens.
 // Managed identity is the default and the broad chain is opt-in.
 func newAzureCredential(clientID string, useDefaultChain bool) (tokenCredential, error) {
+	clientID = resolveClientID(clientID)
+
 	if useDefaultChain {
 		// DefaultAzureCredential walks a broad chain that includes ambient
 		// AZURE_* environment variables and a developer's local `az login`.
@@ -104,9 +132,16 @@ func newAzureCredential(clientID string, useDefaultChain bool) (tokenCredential,
 		// app. So the narrow credential is the default and this one has to be
 		// asked for by name.
 		//
-		// DefaultAzureCredentialOptions has no field for a user-assigned
-		// identity, so on this path the id is read from AZURE_CLIENT_ID in the
-		// environment; db.azure_client_id applies to managed identity only.
+		// DefaultAzureCredentialOptions carries no field for a user-assigned
+		// identity, so this path can only take one from AZURE_CLIENT_ID in the
+		// environment. Set it from the config value when the config supplied
+		// one, so db.azure_client_id means the same thing on both paths.
+		if clientID != "" {
+			if err := os.Setenv("AZURE_CLIENT_ID", clientID); err != nil {
+				return nil, fmt.Errorf("error setting AZURE_CLIENT_ID for the credential chain: %w", err)
+			}
+		}
+
 		return azidentity.NewDefaultAzureCredential(nil)
 	}
 
@@ -138,13 +173,55 @@ func openWithCredential(dsn string, cred tokenCredential) (*sqlx.DB, error) {
 	// sql.OpenDB is lazy. Without this a bad credential or an unreachable
 	// server would first surface at some later query rather than at startup,
 	// unlike the password path, where sqlx.Connect pings.
-	if err := db.Ping(); err != nil {
+	//
+	// Deadlined, unlike that path: a black-holed server — an NSG dropping
+	// rather than refusing — would otherwise hang startup indefinitely, where
+	// failing lets Container Apps restart the revision and say so.
+	ctx, cancel := context.WithTimeout(context.Background(), connectTimeout)
+	defer cancel()
+
+	if err := db.PingContext(ctx); err != nil {
 		db.Close()
 
 		return nil, err
 	}
 
 	return db, nil
+}
+
+// Encrypting sslmodes. libpq defaults to `prefer` when the field is absent,
+// which negotiates TLS but silently falls back to cleartext, so an unset value
+// is as unacceptable here as an explicitly weak one.
+var encryptingSSLModes = map[string]bool{
+	"require":     true,
+	"verify-ca":   true,
+	"verify-full": true,
+}
+
+// RequireEncryptedSSLMode rejects an sslmode that permits an unencrypted
+// connection, which under token authentication is a materially worse problem
+// than it is under a password.
+//
+// The token IS the credential and travels as the DSN password, so a cleartext
+// connection puts a bearer token on the wire — replayable by anyone who saw it
+// for the rest of its lifetime, against a server that by definition accepts
+// tokens. A leaked password, by contrast, is useless against a server with
+// password authentication disabled. Upstream's sample ships
+// `ssl_mode = "disable"`, so this is a live default rather than a hypothetical.
+func RequireEncryptedSSLMode(sslMode string) error {
+	mode := strings.ToLower(strings.TrimSpace(sslMode))
+	if mode == "" {
+		return fmt.Errorf("db.ssl_mode is unset, which libpq treats as %q and allows falling back to "+
+			"cleartext; %q requires one of require, verify-ca or verify-full", "prefer", ModeAzureManagedIdentity)
+	}
+
+	if !encryptingSSLModes[mode] {
+		return fmt.Errorf("db.ssl_mode %q permits an unencrypted connection, which would put the Entra "+
+			"token on the wire in cleartext; %q requires one of require, verify-ca or verify-full",
+			sslMode, ModeAzureManagedIdentity)
+	}
+
+	return nil
 }
 
 // NormaliseMode canonicalises the configured auth mode, defaulting to password

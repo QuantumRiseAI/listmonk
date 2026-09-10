@@ -58,6 +58,13 @@ jobs:
           node-version: 22
           package-manager-cache: false
 
+      # Our carried patches are the only tested code in this repo, and nothing
+      # else runs them: upstream's build-sanity workflow fires on
+      # `pull_request: types: [opened]` only and runs `make dist`. Gating the
+      # release on them is what stops the tests being documentation.
+      - name: Test
+        run: go test -count=1 ./internal/dbauth/...
+
       # `make dist` builds the frontend with yarn, compiles the binary, then
       # stuffbin-packs the static assets into it. The Dockerfile is a thin
       # alpine wrapper that COPYs the finished ./listmonk from the build
@@ -74,16 +81,26 @@ jobs:
           make dist
 
       # A build that silently lacks a patch is the failure worth catching here:
-      # it would deploy, fail to reach the database, and look like an infra
-      # problem. Rendering the config out of the packed binary proves both that
-      # the tag was cut from a commit carrying our patches and that stuffbin
-      # packed the result.
+      # it would deploy, fail to reach the database, and read as an infra
+      # problem. Two separate things are checked, because neither implies the
+      # other.
       - name: Verify the patches are in the packed binary
         run: |
           set -euo pipefail
-          ./listmonk --new-config --config /tmp/probe.toml
-          grep -q 'auth_mode' /tmp/probe.toml
-          grep -q 'disable_password_login' /tmp/probe.toml
+
+          # The Go half is linked. This scope string exists nowhere but
+          # internal/dbauth, so finding it in the binary proves the package was
+          # compiled in — which grepping the config sample does not.
+          strings ./listmonk | grep -q 'ossrdbms-aad.database.windows.net'
+
+          # The config surface travels inside the binary. Rendered from a
+          # directory holding no config.toml.sample, so the output can only
+          # have come from the stuffbin-packed copy; run from the repo root it
+          # would fall back to reading the file off disk and prove nothing.
+          probe="$(mktemp -d)"
+          (cd "$probe" && "${GITHUB_WORKSPACE}/listmonk" --new-config --config probe.toml)
+          grep -q 'auth_mode' "$probe/probe.toml"
+          grep -q 'disable_password_login' "$probe/probe.toml"
 
       - name: Azure login (OIDC)
         uses: azure/login@7ddb5af1ef8758cf1353cf3b42f940aee27ba21c # v3.0.2
@@ -121,17 +138,36 @@ jobs:
 
           echo "image=$image" >> "$GITHUB_OUTPUT"
           echo "digest=$digest" >> "$GITHUB_OUTPUT"
+          # ACR_NAME is an Environment secret, so every string containing it is
+          # masked in logs and in the step summary — including the fully
+          # qualified digest, which is the one value this workflow exists to
+          # produce. Emit the bare sha256 separately so it renders.
+          echo "digest_sha=${digest#*@}" >> "$GITHUB_OUTPUT"
+
+      # The only other gate on this image is "does it compile", so confirm the
+      # artifact that was actually published starts. Pulled by digest rather
+      # than by tag, so this tests the bytes the infra PR will pin.
+      - name: Verify the published image runs
+        env:
+          DIGEST: ${{ steps.build.outputs.digest }}
+        run: |
+          set -euo pipefail
+          docker pull "$DIGEST"
+          docker run --rm --entrypoint /listmonk/listmonk "$DIGEST" --version
 
       - name: Summary
         env:
           IMAGE: ${{ steps.build.outputs.image }}
-          DIGEST: ${{ steps.build.outputs.digest }}
+          DIGEST_SHA: ${{ steps.build.outputs.digest_sha }}
         run: |
           {
             echo "### Pushed to Production ACR"
             echo ""
             echo "- image: \`$IMAGE\`"
-            echo "- digest: \`$DIGEST\`"
+            echo "- digest: \`$DIGEST_SHA\`"
+            echo ""
+            echo "The registry name is an Environment secret, so it renders"
+            echo "masked above; the digest is the value to copy."
             echo ""
             echo "Next: open a PR in \`QuantumRiseAI/infra\` pinning the listmonk"
             echo "Container App to the digest above. Pin the digest, not the tag."

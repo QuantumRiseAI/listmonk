@@ -92,14 +92,73 @@ func TestDSNWithToken(t *testing.T) {
 	}
 }
 
+func TestRequireEncryptedSSLMode(t *testing.T) {
+	for _, tc := range []struct {
+		in      string
+		wantErr bool
+	}{
+		// Unset is `prefer` to libpq, which falls back to cleartext.
+		{in: "", wantErr: true},
+		{in: "disable", wantErr: true},
+		{in: "allow", wantErr: true},
+		{in: "prefer", wantErr: true},
+		{in: "require"},
+		{in: "REQUIRE"},
+		{in: "  verify-ca  "},
+		{in: "verify-full"},
+	} {
+		err := RequireEncryptedSSLMode(tc.in)
+
+		if tc.wantErr && err == nil {
+			t.Errorf("RequireEncryptedSSLMode(%q): expected an error", tc.in)
+		}
+
+		if !tc.wantErr && err != nil {
+			t.Errorf("RequireEncryptedSSLMode(%q): unexpected error: %v", tc.in, err)
+		}
+	}
+}
+
+// ManagedIdentityCredential does not read AZURE_CLIENT_ID itself, and the
+// surrounding infrastructure sets exactly that variable to select an identity,
+// so the fallback is what stops the app authenticating as nothing.
+func TestResolveClientID(t *testing.T) {
+	t.Setenv("AZURE_CLIENT_ID", "from-env")
+
+	if got := resolveClientID("from-config"); got != "from-config" {
+		t.Errorf("resolveClientID() = %q, want the config value to win", got)
+	}
+
+	if got := resolveClientID(""); got != "from-env" {
+		t.Errorf("resolveClientID() = %q, want the env fallback", got)
+	}
+
+	t.Setenv("AZURE_CLIENT_ID", "  padded  ")
+
+	if got := resolveClientID(""); got != "padded" {
+		t.Errorf("resolveClientID() = %q, want the env value trimmed", got)
+	}
+
+	t.Setenv("AZURE_CLIENT_ID", "")
+
+	if got := resolveClientID(""); got != "" {
+		t.Errorf("resolveClientID() = %q, want empty when neither is set", got)
+	}
+}
+
 // The scope is what makes the token usable against Postgres rather than
 // against some other Azure resource, so it is asserted explicitly.
 func TestConnectRequestsThePostgresScope(t *testing.T) {
 	cred := &fakeCredential{token: "tok"}
 	c := &azureTokenConnector{dsn: unreachableDSN, cred: cred}
 
+	// Deadlined so that a sandbox black-holing this address fails the test
+	// rather than hanging it to the package timeout.
+	ctx, cancel := context.WithTimeout(context.Background(), 10*time.Second)
+	defer cancel()
+
 	// Expected to fail at the dial, having already minted a token.
-	if _, err := c.Connect(context.Background()); err == nil {
+	if _, err := c.Connect(ctx); err == nil {
 		t.Fatal("Connect() unexpectedly succeeded against an unreachable server")
 	} else if strings.Contains(err.Error(), "Entra ID token") {
 		t.Fatalf("Connect() failed in the token step rather than the dial: %v", err)
