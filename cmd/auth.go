@@ -81,6 +81,21 @@ var (
 	}
 )
 
+// requirePasswordLogin returns an error for the username/password routes when
+// password login is turned off, leaving OIDC as the only way in.
+//
+// 404 rather than 403 so a disabled instance does not advertise that the
+// routes exist. The first-time setup page is deliberately exempt: it is only
+// reachable while no user exists at all, and there would otherwise be no way
+// to create the first one.
+func (a *App) requirePasswordLogin() error {
+	if a.cfg.Security.DisablePasswordLogin {
+		return echo.NewHTTPError(http.StatusNotFound, "Not found.")
+	}
+
+	return nil
+}
+
 // LoginPage renders the login page and handles the login form.
 func (a *App) LoginPage(c echo.Context) error {
 	// Has the user been setup?
@@ -95,6 +110,12 @@ func (a *App) LoginPage(c echo.Context) error {
 	// Process POST login request.
 	var loginErr error
 	if c.Request().Method == http.MethodPost {
+		// GET stays available either way, because it renders the OIDC button
+		// that is the only remaining way in.
+		if err := a.requirePasswordLogin(); err != nil {
+			return err
+		}
+
 		loginErr = a.doLogin(c)
 		if loginErr == nil {
 			return c.Redirect(http.StatusFound, utils.SanitizeURI(c.FormValue("next")))
@@ -125,6 +146,10 @@ func (a *App) LoginSetupPage(c echo.Context) error {
 
 // TwofaPage renders the 2FA verification page and handles the 2FA form submission.
 func (a *App) TwofaPage(c echo.Context) error {
+	if err := a.requirePasswordLogin(); err != nil {
+		return err
+	}
+
 	var token, next string
 
 	if c.Request().Method == http.MethodPost {
@@ -273,6 +298,10 @@ func (a *App) OIDCFinish(c echo.Context) error {
 
 // ForgotPage renders the forgot password page and handles the forgot password form.
 func (a *App) ForgotPage(c echo.Context) error {
+	if err := a.requirePasswordLogin(); err != nil {
+		return err
+	}
+
 	// Process the forgot password request.
 	if c.Request().Method == http.MethodPost {
 		return a.doForgotPassword(c)
@@ -285,6 +314,10 @@ func (a *App) ForgotPage(c echo.Context) error {
 
 // ResetPage renders the reset password page and handles the reset password form.
 func (a *App) ResetPage(c echo.Context) error {
+	if err := a.requirePasswordLogin(); err != nil {
+		return err
+	}
+
 	var (
 		token = strings.TrimSpace(c.QueryParam("token"))
 		email = strings.ToLower(strings.TrimSpace(c.QueryParam("email")))
@@ -357,7 +390,7 @@ func (a *App) renderLoginPage(c echo.Context, loginErr error) error {
 
 	out := loginTpl{
 		Title:            a.i18n.T("users.login"),
-		PasswordEnabled:  true,
+		PasswordEnabled:  !a.cfg.Security.DisablePasswordLogin,
 		OIDCProvider:     oidcProviderName,
 		OIDCProviderLogo: oidcLogo,
 		NextURI:          next,

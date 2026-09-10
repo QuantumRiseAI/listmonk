@@ -1,0 +1,99 @@
+# Pre-merge checks for our carried patches.
+#
+# Upstream's build-sanity workflow fires on `pull_request: types: [opened]`
+# only — not on pushes to an open PR — and runs `make dist`, which compiles
+# without running anything. So without this, a change to internal/dbauth or the
+# auth gating is reviewed by eye and by nothing else, and the six tests we
+# carry would only ever run at release time.
+#
+# Scoped to the release lines rather than every branch: upstream code changing
+# under `master` is not ours to gate, and running this against every synced
+# upstream PR would be noise.
+name: QR CI
+
+on:
+  pull_request:
+    branches:
+      - "qr-*"
+  push:
+    branches:
+      - "qr-*"
+
+concurrency:
+  group: qr-ci-${{ github.ref }}
+  cancel-in-progress: true
+
+permissions: {}
+
+defaults:
+  run:
+    shell: bash
+
+jobs:
+  check:
+    name: Vet and test
+    runs-on: ubuntu-latest
+    timeout-minutes: 15
+    permissions:
+      contents: read
+    steps:
+      - name: Checkout
+        uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
+        with:
+          persist-credentials: false
+
+      - name: Set up Go
+        uses: actions/setup-go@924ae3a1cded613372ab5595356fb5720e22ba16 # v6.0.0
+        with:
+          go-version-file: go.mod
+
+      # Only our own package is compiled here, not the frontend: this exists to
+      # gate the patches, and `make dist` is already the release path's job.
+      - name: Format
+        run: |
+          set -euo pipefail
+          unformatted="$(gofmt -l cmd internal/dbauth)"
+          if [ -n "$unformatted" ]; then
+            echo "::error::gofmt needed on:"$'\n'"$unformatted" >&2
+            exit 1
+          fi
+
+      - name: Vet
+        run: go vet ./cmd/ ./internal/dbauth/
+
+      - name: Test
+        run: go test -count=1 ./internal/dbauth/...
+
+      - name: Build
+        run: go build ./...
+# ---------------------------------------------------------------------------
+# FORK HYGIENE, recorded here because it is a repo setting with no file of its
+# own and would otherwise be invisible.
+#
+# This is a PUBLIC fork with Actions enabled, and master carries upstream's
+# live workflows: release.yml (goreleaser, `permissions: write-all`, on `v*`),
+# nightly.yml (contents+packages write), github-pages.yml (on push to master)
+# and issues.yml. None has ever run — the fork inherited upstream's 42 `v*`
+# tags as refs rather than as push events — so the exposure is prospective.
+#
+# `gh workflow disable` only works on a workflow GitHub has registered, and it
+# registers one on its first run, so the inherited workflows CANNOT be disabled
+# ahead of time. Only hodor-review.yml was registered (it ran, skipped, on our
+# first PR) and it is now disabled_manually.
+#
+# What actually holds the line, therefore, is refspec discipline:
+#
+#   * NEVER `git push --tags` or `--follow-tags` to this fork. Pushing an
+#     upstream `v*` tag is a push event against upstream's release.yml, and
+#     that is exactly how v6.3.0 would arrive. `push.followTags` is set false
+#     in the maintainer's clone, which is a local setting and protects nobody
+#     else — use explicit refspecs.
+#   * Sync upstream with `git fetch upstream --no-tags`, and do not push to
+#     this fork's master. Master exists only as a base for an eventual upstream
+#     PR; nothing needs it moved.
+#
+# Additionally, the repository's default GITHUB_TOKEN permissions are set to
+# read, so anything that does fire starts from read-only. That does not
+# constrain a workflow declaring its own `permissions:` block, which upstream's
+# do — it reduces blast radius rather than removing it.
+# ---------------------------------------------------------------------------

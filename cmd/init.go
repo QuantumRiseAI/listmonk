@@ -39,6 +39,7 @@ import (
 	"github.com/knadh/listmonk/internal/bounce/mailbox"
 	"github.com/knadh/listmonk/internal/captcha"
 	"github.com/knadh/listmonk/internal/core"
+	"github.com/knadh/listmonk/internal/dbauth"
 	"github.com/knadh/listmonk/internal/i18n"
 	"github.com/knadh/listmonk/internal/manager"
 	"github.com/knadh/listmonk/internal/media"
@@ -126,6 +127,12 @@ type Config struct {
 		} `koanf:"captcha"`
 
 		TrustedURLs []string `koanf:"trusted_urls"`
+
+		// Turns off the username/password routes, leaving OIDC as the only way
+		// in. Deliberately config-file/env only rather than a row in the
+		// settings table: a kill switch an admin can undo from the admin UI is
+		// not one.
+		DisablePasswordLogin bool `koanf:"disable_password_login"`
 	} `koanf:"security"`
 
 	Appearance struct {
@@ -323,8 +330,17 @@ func initDB() *sqlx.DB {
 		MaxOpen     int           `koanf:"max_open"`
 		MaxIdle     int           `koanf:"max_idle"`
 		MaxLifetime time.Duration `koanf:"max_lifetime"`
+
+		AuthMode                       string `koanf:"auth_mode"`
+		AzureClientID                  string `koanf:"azure_client_id"`
+		AzureUseDefaultCredentialChain bool   `koanf:"azure_use_default_credential_chain"`
 	}
 	if err := ko.Unmarshal("db", &c); err != nil {
+		lo.Fatalf("error loading db config: %v", err)
+	}
+
+	authMode, err := dbauth.NormaliseMode(c.AuthMode)
+	if err != nil {
 		lo.Fatalf("error loading db config: %v", err)
 	}
 
@@ -343,6 +359,26 @@ func initDB() *sqlx.DB {
 		delete(fields, "port")
 	}
 
+	if authMode == dbauth.ModeAzureManagedIdentity {
+		// A configured password here is ambiguous rather than merely
+		// redundant: it cannot work against a server with password
+		// authentication disabled, which is the only reason to pick this mode,
+		// and quietly ignoring it would hide the misconfiguration.
+		//
+		// No delete of the password field is needed after this: it is provably
+		// empty, and the loop below skips empty values anyway.
+		if c.Password != "" {
+			lo.Fatalf("db.auth_mode is %q, which authenticates with Entra ID tokens; remove db.password",
+				dbauth.ModeAzureManagedIdentity)
+		}
+
+		// The token travels as the DSN password, so an sslmode permitting
+		// cleartext would put a bearer credential on the wire.
+		if err := dbauth.RequireEncryptedSSLMode(c.SSLMode); err != nil {
+			lo.Fatalf("error loading db config: %v", err)
+		}
+	}
+
 	var parts []string
 	for k, v := range fields {
 		if v == "" {
@@ -356,7 +392,14 @@ func initDB() *sqlx.DB {
 		parts = append(parts, c.Params)
 	}
 
-	db, err := sqlx.Connect("postgres", strings.Join(parts, " "))
+	dsn := strings.Join(parts, " ")
+
+	var db *sqlx.DB
+	if authMode == dbauth.ModeAzureManagedIdentity {
+		db, err = dbauth.OpenAzureManagedIdentity(dsn, c.AzureClientID, c.AzureUseDefaultCredentialChain)
+	} else {
+		db, err = sqlx.Connect("postgres", dsn)
+	}
 	if err != nil {
 		lo.Fatalf("error connecting to DB: %v", err)
 	}
@@ -450,8 +493,38 @@ func initSettings(query string, db *sqlx.DB, ko *koanf.Koanf) {
 	if err := json.Unmarshal(s, &out); err != nil {
 		lo.Fatalf("error unmarshalling settings from DB: %v", err)
 	}
+
+	assertNoUIOverridableKillSwitch(out)
 	if err := ko.Load(confmap.Provider(out, "."), nil); err != nil {
 		lo.Fatalf("error parsing settings from DB: %v", err)
+	}
+}
+
+// assertNoUIOverridableKillSwitch refuses to start if the settings table
+// carries a row that would override security.disable_password_login.
+//
+// DB settings load after the config file and environment, so such a row would
+// win — and the settings table is what the admin UI edits. No such row exists
+// and the settings API will not create one, so this is unreachable today; that
+// is the point. Without this check, "an admin cannot re-enable password login
+// from the UI" is a property resting on the absence of a row rather than on
+// anything enforcing it, and the next person to add a settings key near this
+// one would not be told.
+func assertNoUIOverridableKillSwitch(settings map[string]any) {
+	const key = "disable_password_login"
+
+	if _, ok := settings["security."+key]; ok {
+		lo.Fatalf("the settings table carries a `security.%s` row, which would override the "+
+			"config-file kill switch; remove the row", key)
+	}
+
+	// Also reject the nested spelling, in case a future migration stores the
+	// security block as one object rather than a row per leaf.
+	if sec, ok := settings["security"].(map[string]any); ok {
+		if _, ok := sec[key]; ok {
+			lo.Fatalf("the settings table's `security` row carries %q, which would override the "+
+				"config-file kill switch; remove it", key)
+		}
 	}
 }
 

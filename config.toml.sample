@@ -18,7 +18,59 @@ database = "listmonk"
 ssl_mode = "disable"
 max_open = 25
 max_idle = 25
+
+# Under auth_mode = "azure_managed_identity" this also bounds how long a
+# connection outlives the token it was opened with. The token is validated when
+# the connection is established, not per query, so a long-lived connection is
+# not broken by its token expiring — but recycling well inside the token's
+# roughly one-hour lifetime keeps that from being something to reason about.
+# Setting 0 (unlimited) is what would make it worth thinking through.
 max_lifetime = "300s"
 
 # Optional space separated Postgres DSN params. eg: "application_name=listmonk gssencmode=disable"
 params = ""
+
+# How to authenticate to Postgres.
+#   "password"               (default) uses the `password` field above.
+#   "azure_managed_identity" presents a short-lived Microsoft Entra ID token
+#                            instead, for an Azure Database for PostgreSQL
+#                            server that has password authentication disabled.
+#                            Leave `password` empty and set `user` to the
+#                            database role bound to the identity.
+#
+# NOTE that "azure_managed_identity" additionally REQUIRES an ssl_mode of
+# require, verify-ca or verify-full, and refuses to start otherwise. The token
+# is the credential and travels as the DSN password, so an unencrypted
+# connection would put a bearer token on the wire — replayable for its lifetime
+# against a server that by definition accepts tokens. The `disable` default
+# above is fine for a password on a trusted network and is not fine here.
+auth_mode = "password"
+
+# Client ID of a user-assigned managed identity to authenticate as. Leave empty
+# to use the host's system-assigned identity. Applies to
+# auth_mode = "azure_managed_identity" only.
+azure_client_id = ""
+
+# Authenticate through the broad DefaultAzureCredential chain rather than
+# managed identity alone, so that a local `az login` works. For development
+# only: the chain also honours ambient AZURE_* environment credentials, which
+# would silently outrank the intended managed identity.
+azure_use_default_credential_chain = false
+
+[security]
+# Turn off the username/password login routes entirely, leaving OIDC as the
+# only way into the admin UI. The login page still renders, so that the SSO
+# button remains reachable, but /admin/login POST, /admin/login/twofa,
+# /admin/forgot and /admin/reset all return 404.
+#
+# Unlike the rest of the security settings, this one lives here rather than in
+# the settings table, and so cannot be turned back on from the admin UI. That
+# is the point of it: a kill switch an admin can undo is not one. Recovering
+# from a broken identity provider means changing this and restarting.
+#
+# API tokens are unaffected — they authenticate on the Authorization header and
+# do not go through these routes.
+#
+# The first-time setup page is exempt, since it is only reachable while no user
+# exists at all and there would otherwise be no way to create the first one.
+disable_password_login = false
