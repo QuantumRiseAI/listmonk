@@ -1,0 +1,138 @@
+# Build the patched listmonk and push it to the production ACR.
+#
+# DELIBERATELY SEPARATE FROM upstream's release.yml. That one is goreleaser,
+# triggered on `v*` with `permissions: write-all`, and publishes upstream's own
+# artifacts — it must never run here. Our tags therefore carry no leading `v`:
+# `6.2.0-qr.1` reads as "upstream 6.2.0, our patch level 1" and cannot match
+# upstream's filter, so the two stay apart without editing a file that would
+# then conflict on every upstream sync.
+#
+# CUT THE TAG ON AN UPSTREAM RELEASE TAG PLUS OUR PATCHES, never on the fork's
+# master. Upstream has no test suite and no CI test gate — its build-sanity
+# workflow runs `make dist`, i.e. "does it compile" — so a release tag is the
+# only version anyone has blessed.
+name: QR release
+
+on:
+  push:
+    tags:
+      - "[0-9]+.[0-9]+.[0-9]+-qr.[0-9]+"
+
+concurrency:
+  group: qr-release-${{ github.ref }}
+  cancel-in-progress: false
+
+permissions: {}
+
+defaults:
+  run:
+    shell: bash
+
+jobs:
+  build-and-push:
+    name: Build and push to ACR
+    runs-on: ubuntu-latest
+    timeout-minutes: 30
+    # The production-acr-push GitHub Environment is what scopes the federated
+    # credential. The identity is declared in QuantumRiseAI/infra as
+    # azuread_application.listmonk_release, granted AcrPush on the env ACR and
+    # nothing else.
+    environment: production-acr-push
+    permissions:
+      contents: read # checkout
+      id-token: write # azure/login OIDC
+    steps:
+      - name: Checkout
+        uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
+        with:
+          persist-credentials: false
+
+      - name: Set up Go
+        uses: actions/setup-go@924ae3a1cded613372ab5595356fb5720e22ba16 # v6.0.0
+        with:
+          go-version-file: go.mod
+
+      - name: Set up Node
+        uses: actions/setup-node@820762786026740c76f36085b0efc47a31fe5020 # v7.0.0
+        with:
+          node-version: 22
+          package-manager-cache: false
+
+      # `make dist` builds the frontend with yarn, compiles the binary, then
+      # stuffbin-packs the static assets into it. The Dockerfile is a thin
+      # alpine wrapper that COPYs the finished ./listmonk from the build
+      # context, so the binary has to exist before the image build.
+      #
+      # GOPATH is exported because the Makefile resolves stuffbin as
+      # $(GOPATH)/bin/stuffbin, reading the environment variable rather than
+      # `go env`. Unset, that expands to /bin/stuffbin and packing fails.
+      - name: Build
+        run: |
+          set -euo pipefail
+          corepack enable
+          export GOPATH="$(go env GOPATH)"
+          make dist
+
+      # A build that silently lacks a patch is the failure worth catching here:
+      # it would deploy, fail to reach the database, and look like an infra
+      # problem. Rendering the config out of the packed binary proves both that
+      # the tag was cut from a commit carrying our patches and that stuffbin
+      # packed the result.
+      - name: Verify the patches are in the packed binary
+        run: |
+          set -euo pipefail
+          ./listmonk --new-config --config /tmp/probe.toml
+          grep -q 'auth_mode' /tmp/probe.toml
+          grep -q 'disable_password_login' /tmp/probe.toml
+
+      - name: Azure login (OIDC)
+        uses: azure/login@7ddb5af1ef8758cf1353cf3b42f940aee27ba21c # v3.0.2
+        with:
+          client-id: ${{ secrets.AZURE_CLIENT_ID }}
+          tenant-id: ${{ secrets.AZURE_TENANT_ID }}
+          allow-no-subscriptions: true
+
+      - name: ACR login
+        env:
+          ACR_NAME: ${{ secrets.ACR_NAME }}
+        run: az acr login --name "$ACR_NAME"
+
+      - name: Build and push image
+        id: build
+        env:
+          ACR_NAME: ${{ secrets.ACR_NAME }}
+        run: |
+          set -euo pipefail
+          tag="${GITHUB_REF_NAME}"
+          image="${ACR_NAME}.azurecr.io/listmonk:${tag}"
+
+          docker build --pull --platform linux/amd64 -t "$image" .
+          docker push "$image"
+
+          # Filter to this repository's digest rather than taking RepoDigests[0],
+          # which is unreliable on a daemon carrying other repositories' digests.
+          repo="${image%:*}"
+          digest=$(docker inspect "$image" --format '{{range .RepoDigests}}{{println .}}{{end}}' \
+            | grep -F "${repo}@" | head -n1)
+          if [ -z "$digest" ]; then
+            echo "::error::could not resolve pushed digest for $repo" >&2
+            exit 1
+          fi
+
+          echo "image=$image" >> "$GITHUB_OUTPUT"
+          echo "digest=$digest" >> "$GITHUB_OUTPUT"
+
+      - name: Summary
+        env:
+          IMAGE: ${{ steps.build.outputs.image }}
+          DIGEST: ${{ steps.build.outputs.digest }}
+        run: |
+          {
+            echo "### Pushed to Production ACR"
+            echo ""
+            echo "- image: \`$IMAGE\`"
+            echo "- digest: \`$DIGEST\`"
+            echo ""
+            echo "Next: open a PR in \`QuantumRiseAI/infra\` pinning the listmonk"
+            echo "Container App to the digest above. Pin the digest, not the tag."
+          } >> "$GITHUB_STEP_SUMMARY"
