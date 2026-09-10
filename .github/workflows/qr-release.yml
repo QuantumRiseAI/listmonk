@@ -36,7 +36,19 @@ jobs:
     # The production-acr-push GitHub Environment is what scopes the federated
     # credential. The identity is declared in QuantumRiseAI/infra as
     # azuread_application.listmonk_release, granted AcrPush on the env ACR and
-    # nothing else.
+    # nothing else, and that root also PUBLISHES the three values below into
+    # this environment by apply — they are not set by hand.
+    #
+    # They are variables rather than secrets deliberately: none of a client id,
+    # a tenant id or a registry name is secret, the boundary being the
+    # federated subject, and a variable is readable, so this environment's
+    # configuration can be checked without an apply and nothing the summary
+    # prints comes back masked.
+    #
+    # The environment additionally carries a deployment branch policy limiting
+    # it to tags matching `*-qr.*`. Without that the boundary on assuming the
+    # credential would be write access to this public fork rather than the tag
+    # convention this file documents.
     environment: production-acr-push
     permissions:
       contents: read # checkout
@@ -105,19 +117,19 @@ jobs:
       - name: Azure login (OIDC)
         uses: azure/login@7ddb5af1ef8758cf1353cf3b42f940aee27ba21c # v3.0.2
         with:
-          client-id: ${{ secrets.AZURE_CLIENT_ID }}
-          tenant-id: ${{ secrets.AZURE_TENANT_ID }}
+          client-id: ${{ vars.AZURE_CLIENT_ID }}
+          tenant-id: ${{ vars.AZURE_TENANT_ID }}
           allow-no-subscriptions: true
 
       - name: ACR login
         env:
-          ACR_NAME: ${{ secrets.ACR_NAME }}
+          ACR_NAME: ${{ vars.ACR_NAME }}
         run: az acr login --name "$ACR_NAME"
 
       - name: Build and push image
         id: build
         env:
-          ACR_NAME: ${{ secrets.ACR_NAME }}
+          ACR_NAME: ${{ vars.ACR_NAME }}
         run: |
           set -euo pipefail
           tag="${GITHUB_REF_NAME}"
@@ -138,11 +150,6 @@ jobs:
 
           echo "image=$image" >> "$GITHUB_OUTPUT"
           echo "digest=$digest" >> "$GITHUB_OUTPUT"
-          # ACR_NAME is an Environment secret, so every string containing it is
-          # masked in logs and in the step summary — including the fully
-          # qualified digest, which is the one value this workflow exists to
-          # produce. Emit the bare sha256 separately so it renders.
-          echo "digest_sha=${digest#*@}" >> "$GITHUB_OUTPUT"
 
       # The only other gate on this image is "does it compile", so confirm the
       # artifact that was actually published starts. Pulled by digest rather
@@ -158,16 +165,13 @@ jobs:
       - name: Summary
         env:
           IMAGE: ${{ steps.build.outputs.image }}
-          DIGEST_SHA: ${{ steps.build.outputs.digest_sha }}
+          DIGEST: ${{ steps.build.outputs.digest }}
         run: |
           {
             echo "### Pushed to Production ACR"
             echo ""
             echo "- image: \`$IMAGE\`"
-            echo "- digest: \`$DIGEST_SHA\`"
-            echo ""
-            echo "The registry name is an Environment secret, so it renders"
-            echo "masked above; the digest is the value to copy."
+            echo "- digest: \`$DIGEST\`"
             echo ""
             echo "Next: open a PR in \`QuantumRiseAI/infra\` pinning the listmonk"
             echo "Container App to the digest above. Pin the digest, not the tag."
