@@ -39,6 +39,7 @@ import (
 	"github.com/knadh/listmonk/internal/bounce/mailbox"
 	"github.com/knadh/listmonk/internal/captcha"
 	"github.com/knadh/listmonk/internal/core"
+	"github.com/knadh/listmonk/internal/dbauth"
 	"github.com/knadh/listmonk/internal/i18n"
 	"github.com/knadh/listmonk/internal/manager"
 	"github.com/knadh/listmonk/internal/media"
@@ -323,8 +324,17 @@ func initDB() *sqlx.DB {
 		MaxOpen     int           `koanf:"max_open"`
 		MaxIdle     int           `koanf:"max_idle"`
 		MaxLifetime time.Duration `koanf:"max_lifetime"`
+
+		AuthMode                       string `koanf:"auth_mode"`
+		AzureClientID                  string `koanf:"azure_client_id"`
+		AzureUseDefaultCredentialChain bool   `koanf:"azure_use_default_credential_chain"`
 	}
 	if err := ko.Unmarshal("db", &c); err != nil {
+		lo.Fatalf("error loading db config: %v", err)
+	}
+
+	authMode, err := dbauth.NormaliseMode(c.AuthMode)
+	if err != nil {
 		lo.Fatalf("error loading db config: %v", err)
 	}
 
@@ -343,6 +353,19 @@ func initDB() *sqlx.DB {
 		delete(fields, "port")
 	}
 
+	if authMode == dbauth.ModeAzureManagedIdentity {
+		// A configured password here is ambiguous rather than merely
+		// redundant: it cannot work against a server with password
+		// authentication disabled, which is the only reason to pick this mode,
+		// and quietly ignoring it would hide the misconfiguration.
+		if c.Password != "" {
+			lo.Fatalf("db.auth_mode is %q, which authenticates with Entra ID tokens; remove db.password",
+				dbauth.ModeAzureManagedIdentity)
+		}
+
+		delete(fields, "password")
+	}
+
 	var parts []string
 	for k, v := range fields {
 		if v == "" {
@@ -356,7 +379,14 @@ func initDB() *sqlx.DB {
 		parts = append(parts, c.Params)
 	}
 
-	db, err := sqlx.Connect("postgres", strings.Join(parts, " "))
+	dsn := strings.Join(parts, " ")
+
+	var db *sqlx.DB
+	if authMode == dbauth.ModeAzureManagedIdentity {
+		db, err = dbauth.OpenAzureManagedIdentity(dsn, c.AzureClientID, c.AzureUseDefaultCredentialChain)
+	} else {
+		db, err = sqlx.Connect("postgres", dsn)
+	}
 	if err != nil {
 		lo.Fatalf("error connecting to DB: %v", err)
 	}

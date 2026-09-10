@@ -22,3 +22,23 @@ max_lifetime = "300s"
 
 # Optional space separated Postgres DSN params. eg: "application_name=listmonk gssencmode=disable"
 params = ""
+
+# How to authenticate to Postgres.
+#   "password"               (default) uses the `password` field above.
+#   "azure_managed_identity" presents a short-lived Microsoft Entra ID token
+#                            instead, for an Azure Database for PostgreSQL
+#                            server that has password authentication disabled.
+#                            Leave `password` empty and set `user` to the
+#                            database role bound to the identity.
+auth_mode = "password"
+
+# Client ID of a user-assigned managed identity to authenticate as. Leave empty
+# to use the host's system-assigned identity. Applies to
+# auth_mode = "azure_managed_identity" only.
+azure_client_id = ""
+
+# Authenticate through the broad DefaultAzureCredential chain rather than
+# managed identity alone, so that a local `az login` works. For development
+# only: the chain also honours ambient AZURE_* environment credentials, which
+# would silently outrank the intended managed identity.
+azure_use_default_credential_chain = false
