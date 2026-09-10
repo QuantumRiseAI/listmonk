@@ -42,3 +42,21 @@ azure_client_id = ""
 # only: the chain also honours ambient AZURE_* environment credentials, which
 # would silently outrank the intended managed identity.
 azure_use_default_credential_chain = false
+
+[security]
+# Turn off the username/password login routes entirely, leaving OIDC as the
+# only way into the admin UI. The login page still renders, so that the SSO
+# button remains reachable, but /admin/login POST, /admin/login/twofa,
+# /admin/forgot and /admin/reset all return 404.
+#
+# Unlike the rest of the security settings, this one lives here rather than in
+# the settings table, and so cannot be turned back on from the admin UI. That
+# is the point of it: a kill switch an admin can undo is not one. Recovering
+# from a broken identity provider means changing this and restarting.
+#
+# API tokens are unaffected — they authenticate on the Authorization header and
+# do not go through these routes.
+#
+# The first-time setup page is exempt, since it is only reachable while no user
+# exists at all and there would otherwise be no way to create the first one.
+disable_password_login = false

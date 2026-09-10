@@ -127,6 +127,12 @@ type Config struct {
 		} `koanf:"captcha"`
 
 		TrustedURLs []string `koanf:"trusted_urls"`
+
+		// Turns off the username/password routes, leaving OIDC as the only way
+		// in. Deliberately config-file/env only rather than a row in the
+		// settings table: a kill switch an admin can undo from the admin UI is
+		// not one.
+		DisablePasswordLogin bool `koanf:"disable_password_login"`
 	} `koanf:"security"`
 
 	Appearance struct {
