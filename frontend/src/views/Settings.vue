@@ -102,6 +102,11 @@ export default Vue.extend({
       formCopy: '',
       form: null,
       tab: 0,
+
+      // Settings keys the environment supplies. Their inputs are disabled:
+      // the values shown are what the app is running, and an edit would be
+      // silently reverted on the next start.
+      envManagedKeys: [],
     };
   },
 
@@ -220,6 +225,67 @@ export default Vue.extend({
       return false;
     },
 
+    // Disable the inputs for settings the environment supplies.
+    //
+    // Done against the rendered DOM rather than by passing a prop into each of
+    // the nine tab components and binding :disabled on every field in them.
+    // Every input already carries name="<settings key>", which is the mapping
+    // this needs, and the alternative is an edit to every field in the form for
+    // a case most deployments never hit.
+    lockEnvManagedFields() {
+      if (!this.envManagedKeys.length || !this.$el.querySelectorAll) {
+        return;
+      }
+
+      const plain = new Set();
+      const lists = {};
+
+      this.envManagedKeys.forEach((key) => {
+        // `smtp.0.password` names one field of one block in a list section.
+        const m = key.match(/^([^.]+)\.(\d+)\.(.+)$/);
+        if (!m) {
+          plain.add(key);
+          return;
+        }
+
+        const [, section, index, field] = m;
+        lists[section] = lists[section] || {};
+        lists[section][index] = lists[section][index] || new Set();
+        lists[section][index].add(field);
+      });
+
+      const disable = (el) => {
+        if (!el) {
+          return;
+        }
+        el.setAttribute('disabled', 'disabled');
+        el.setAttribute('title', this.$t('settings.envManaged'));
+        el.classList.add('env-managed');
+      };
+
+      this.$el.querySelectorAll('[name]').forEach((el) => {
+        if (plain.has(el.getAttribute('name'))) {
+          disable(el);
+        }
+      });
+
+      // Only SMTP is mapped. Bounce boxes and messengers are list sections too,
+      // but nothing delivers their credentials by environment today; add the
+      // container selector here when something does.
+      Object.entries(lists.smtp || {}).forEach(([index, fields]) => {
+        const block = this.$el.querySelectorAll('.mail-servers > .block')[index];
+        if (!block) {
+          return;
+        }
+
+        block.querySelectorAll('[name]').forEach((el) => {
+          if (fields.has(el.getAttribute('name'))) {
+            disable(el);
+          }
+        });
+      });
+    },
+
     getSettings() {
       this.isLoading = true;
       this.$api.getSettings().then((data) => {
@@ -236,6 +302,11 @@ export default Vue.extend({
           d.smtp[i].strEmailHeaders = JSON.stringify(d.smtp[i].email_headers, null, 4);
         }
 
+        // Keys the environment manages. Taken out of the form so it is neither
+        // posted back nor counted as a change against formCopy.
+        this.envManagedKeys = d['env.managed_keys'] || [];
+        delete d['env.managed_keys'];
+
         // Domain blocklist array to multi-line string.
         d['privacy.domain_blocklist'] = d['privacy.domain_blocklist'].join('\n');
         d['privacy.domain_allowlist'] = d['privacy.domain_allowlist'].join('\n');
@@ -245,6 +316,7 @@ export default Vue.extend({
         this.formCopy = JSON.stringify(d);
 
         this.$nextTick(() => {
+          this.lockEnvManagedFields();
           this.isLoading = false;
         });
       });
@@ -286,6 +358,12 @@ export default Vue.extend({
   watch: {
     tab(t) {
       this.$utils.setPref('settings.tab', t);
+
+      // Tab panels render lazily, so fields on a tab that has never been opened
+      // do not exist to be disabled until now.
+      this.$nextTick(() => {
+        this.lockEnvManagedFields();
+      });
     },
   },
 });

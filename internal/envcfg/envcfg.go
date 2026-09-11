@@ -207,3 +207,86 @@ func mergeIndexed(existing []map[string]any, overrides map[int]map[string]any) (
 
 	return out, nil
 }
+
+// Keys returns the settings keys the environment supplies, as the flat paths
+// the settings document uses ("app.root_url", "smtp.0.password"), sorted.
+//
+// It exists so the admin UI can tell the truth. Settings are read from the
+// database, but Reapply puts the environment on top of them at load, so a key
+// set in the environment is displayed with a value the app is not using. That
+// is worse than cosmetic: the SMTP test dials whatever the form holds, so a
+// stale form tests a server nobody configured.
+func Keys() ([]string, error) {
+	fromEnv := koanf.New(Delim)
+	if err := fromEnv.Load(Provider(), nil); err != nil {
+		return nil, fmt.Errorf("error reading env: %w", err)
+	}
+
+	all := fromEnv.All()
+
+	keys := make([]string, 0, len(all))
+	for key := range all {
+		keys = append(keys, key)
+	}
+
+	sort.Strings(keys)
+
+	return keys, nil
+}
+
+// Effective overlays, onto a decoded settings document, the values ko holds for
+// the given keys.
+//
+// The document is the settings JSON, whose top-level keys are themselves dotted
+// ("app.root_url" is one key, not two levels), except for list sections like
+// "smtp" which hold arrays. Those two shapes are the only ones settings use.
+func Effective(doc map[string]any, ko *koanf.Koanf, keys []string) {
+	// List sections are read through Slices, not by indexed path. koanf holds a
+	// list as one value, so ko.Get("smtp.0.host") is nil however the list got
+	// there — the same quirk that makes Reapply fold indexed keys into slices in
+	// the first place. Cached because a section is usually named by several keys.
+	slices := map[string][]*koanf.Koanf{}
+
+	for _, key := range keys {
+		if _, ok := doc[key]; ok {
+			doc[key] = ko.Get(key)
+			continue
+		}
+
+		m := indexedKeyRe.FindStringSubmatch(key)
+		if m == nil {
+			// A key the settings document does not carry. Config-file-only
+			// settings such as `app.address` and the whole `db` block live in
+			// the environment and never in the database, so this is ordinary.
+			continue
+		}
+
+		section, field := m[1], m[3]
+
+		index, err := strconv.Atoi(m[2])
+		if err != nil {
+			continue
+		}
+
+		list, ok := doc[section].([]any)
+		if !ok || index >= len(list) {
+			continue
+		}
+
+		element, ok := list[index].(map[string]any)
+		if !ok {
+			continue
+		}
+
+		if _, ok := slices[section]; !ok {
+			slices[section] = ko.Slices(section)
+		}
+
+		running := slices[section]
+		if index >= len(running) {
+			continue
+		}
+
+		element[field] = running[index].Get(field)
+	}
+}

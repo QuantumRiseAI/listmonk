@@ -21,6 +21,7 @@ import (
 	"github.com/knadh/koanf/providers/rawbytes"
 	"github.com/knadh/koanf/v2"
 	"github.com/knadh/listmonk/internal/auth"
+	"github.com/knadh/listmonk/internal/envcfg"
 	"github.com/knadh/listmonk/internal/messenger/email"
 	"github.com/knadh/listmonk/internal/notifs"
 	"github.com/knadh/listmonk/internal/secrets"
@@ -56,9 +57,23 @@ var (
 	reAlphaNum = regexp.MustCompile(`[^a-z0-9\-]`)
 )
 
+// The key the settings document carries its environment-managed key list under.
+// Dotted like every other settings key, and absent from models.Settings, so a
+// form that posts it straight back is ignored rather than rejected.
+const envManagedKey = "env.managed_keys"
+
 // GetSettings returns settings from the DB.
 func (a *App) GetSettings(c echo.Context) error {
 	s, err := a.core.GetSettings()
+	if err != nil {
+		return err
+	}
+
+	// What the environment supplies, so the form can show what is RUNNING
+	// rather than what is stored. These are read from the database, but the
+	// environment was put back on top of them at load, so without this the form
+	// shows values the app is not using and invites edits that silently revert.
+	envKeys, err := a.effectiveSettings(&s)
 	if err != nil {
 		return err
 	}
@@ -83,7 +98,84 @@ func (a *App) GetSettings(c echo.Context) error {
 	s.SecurityCaptcha.HCaptcha.Secret = strings.Repeat(pwdMask, utf8.RuneCountInString(s.SecurityCaptcha.HCaptcha.Secret))
 	s.OIDC.ClientSecret = strings.Repeat(pwdMask, utf8.RuneCountInString(s.OIDC.ClientSecret))
 
-	return c.JSON(http.StatusOK, okResp{s})
+	// Masked AFTER the overlay, so an env-supplied credential is shown the same
+	// way a stored one is. What the operator needs from those fields is not the
+	// value but the knowledge that editing them here does nothing, which is what
+	// the key list below is for.
+	out, err := settingsWithEnvKeys(s, envKeys)
+	if err != nil {
+		return err
+	}
+
+	return c.JSON(http.StatusOK, okResp{out})
+}
+
+// effectiveSettings overlays the running configuration onto s for every key the
+// environment supplies, and returns those keys.
+//
+// Returns nothing at all when the operator has not asked for the environment to
+// be authoritative, because then the database genuinely is the truth and the
+// form is already showing it.
+func (a *App) effectiveSettings(s *models.Settings) ([]string, error) {
+	if !ko.Bool("app.env_overrides_settings") {
+		return nil, nil
+	}
+
+	keys, err := envcfg.Keys()
+	if err != nil {
+		a.log.Printf("error reading env keys: %v", err)
+		return nil, echo.NewHTTPError(http.StatusInternalServerError, a.i18n.Ts("globals.messages.internalError"))
+	}
+
+	// Round-tripped through JSON because the settings document is addressed by
+	// the same dotted paths the environment uses, and its json tags are the only
+	// place that mapping exists.
+	doc := map[string]any{}
+	if err := remarshal(s, &doc); err != nil {
+		a.log.Printf("error decoding settings: %v", err)
+		return nil, echo.NewHTTPError(http.StatusInternalServerError, a.i18n.Ts("globals.messages.internalError"))
+	}
+
+	envcfg.Effective(doc, ko, keys)
+
+	if err := remarshal(doc, s); err != nil {
+		a.log.Printf("error encoding settings: %v", err)
+		return nil, echo.NewHTTPError(http.StatusInternalServerError, a.i18n.Ts("globals.messages.internalError"))
+	}
+
+	return keys, nil
+}
+
+// settingsWithEnvKeys renders settings as the document the UI consumes, with the
+// environment-managed keys named under a key of its own.
+//
+// A sibling key rather than a wrapper object: the admin UI reads settings as a
+// flat map addressed by dotted path, and every other shape would mean changing
+// each of its nine tabs.
+func settingsWithEnvKeys(s models.Settings, keys []string) (map[string]any, error) {
+	doc := map[string]any{}
+	if err := remarshal(s, &doc); err != nil {
+		return nil, err
+	}
+
+	// Always present, so the UI can rely on it rather than testing for it.
+	if keys == nil {
+		keys = []string{}
+	}
+
+	doc[envManagedKey] = keys
+
+	return doc, nil
+}
+
+// remarshal converts between shapes that share their JSON representation.
+func remarshal(from any, to any) error {
+	b, err := json.Marshal(from)
+	if err != nil {
+		return err
+	}
+
+	return json.Unmarshal(b, to)
 }
 
 // UpdateSettings returns settings from the DB.
@@ -414,6 +506,26 @@ func (a *App) TestSMTPSettings(c echo.Context) error {
 		return echo.NewHTTPError(http.StatusBadRequest, a.i18n.Ts("globals.messages.missingFields", "name", "email"))
 	}
 
+	// If this server is managed by the environment, test what the app actually
+	// sends with rather than what the form posted.
+	//
+	// Without this the button cannot test such a server at all: the form shows
+	// the database row, which for an env-managed deployment is whatever the
+	// installer left there, and the password field holds a mask. It would dial
+	// some default host with an empty password and report a failure that says
+	// nothing about the configured relay.
+	//
+	// DELIBERATELY NOT "resolve secret references in the request". That reads
+	// like the same fix and is a credential exfiltration primitive: anyone with
+	// settings:manage could post a reference to any secret this identity can
+	// read, point host at a listener of their own, and collect the resolved
+	// value from the AUTH exchange. Here the caller chooses neither the host nor
+	// the password; both come from the running configuration.
+	if live, ok := a.liveSMTPServer(ko.String("uuid")); ok {
+		live.EmailHeaders = req.EmailHeaders
+		req = live
+	}
+
 	// Initialize a new SMTP pool.
 	req.MaxConns = 1
 	req.IdleTimeout = time.Second * 2
@@ -452,4 +564,56 @@ func (a *App) GetAboutInfo(c echo.Context) error {
 	out.System.OSMB = mem.Sys / 1024 / 1024
 
 	return c.JSON(http.StatusOK, out)
+}
+
+// liveSMTPServer returns the running configuration for the SMTP block with this
+// UUID, when the environment is what supplies it.
+//
+// Matched by UUID rather than by position because the UUID is the only stable
+// identity an SMTP block has: it is assigned once, stored in the database, and
+// survives blocks being reordered or removed in the admin UI. The environment
+// overrides fields within a block and never the UUID, so the block the form is
+// testing and the block the app is running are the same row.
+func (a *App) liveSMTPServer(uuid string) (email.Server, bool) {
+	if uuid == "" || !ko.Bool("app.env_overrides_settings") {
+		return email.Server{}, false
+	}
+
+	keys, err := envcfg.Keys()
+	if err != nil {
+		a.log.Printf("error reading env keys: %v", err)
+		return email.Server{}, false
+	}
+
+	managed := false
+	for _, key := range keys {
+		if strings.HasPrefix(key, "smtp"+envcfg.Delim) {
+			managed = true
+			break
+		}
+	}
+
+	if !managed {
+		return email.Server{}, false
+	}
+
+	for _, block := range ko.Slices("smtp") {
+		if block.String("uuid") != uuid {
+			continue
+		}
+
+		var srv email.Server
+		if err := block.UnmarshalWithConf("", &srv, koanf.UnmarshalConf{Tag: "json"}); err != nil {
+			a.log.Printf("error reading live SMTP config: %v", err)
+			return email.Server{}, false
+		}
+
+		// The password is a reference in exactly the deployment this exists for,
+		// and resolving it is the app's own privilege rather than the caller's.
+		srv.Password = resolveSecret(srv.Password)
+
+		return srv, true
+	}
+
+	return email.Server{}, false
 }
