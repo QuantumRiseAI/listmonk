@@ -509,6 +509,7 @@
     "settings.messengers.url": "URL",
     "settings.messengers.urlHelp": "Root URL of the Postback server.",
     "settings.messengers.username": "Username",
+    "settings.envManaged": "Set by the environment. Editing it here has no effect, because the environment is re-applied over the settings table on every start.",
     "settings.needsRestart": "Settings changed. Pause all running campaigns and restart the app",
     "settings.performance.batchSize": "Batch size",
     "settings.performance.batchSizeHelp": "The number of subscribers to pull from the database in a single iteration. Each iteration pulls subscribers from the database, sends messages to them, and then moves on to the next iteration to pull the next batch. This should ideally be higher than the maximum achievable throughput (concurrency * message_rate).",
