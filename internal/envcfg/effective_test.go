@@ -1,6 +1,7 @@
 package envcfg
 
 import (
+	"encoding/json"
 	"reflect"
 	"testing"
 
@@ -134,5 +135,81 @@ func TestKeysReportsWhatTheEnvironmentSupplies(t *testing.T) {
 
 	if len(want) > 0 {
 		t.Errorf("Keys() = %v, missing %v", keys, reflect.ValueOf(want).MapKeys())
+	}
+}
+
+// Every environment value is a string, so overlaying one onto a setting the
+// struct declares as a bool or a number has to convert rather than copy.
+//
+// The un-converted version failed in production, on the first such key the
+// decoder happened to reach:
+//
+//	json: cannot unmarshal string into Go struct field
+//	Settings.privacy.allow_blocklist of type bool
+func TestEffectiveConvertsToTheStoredType(t *testing.T) {
+	ko := koanf.New(Delim)
+
+	// As the environment provider yields them: strings, every one.
+	if err := ko.Load(confmap.Provider(map[string]any{
+		"privacy.allow_blocklist": "true",
+		"app.notify_emails":       "a@example.test,b@example.test",
+		"smtp": []any{
+			map[string]any{"port": "587", "host": "smtp.azurecomm.net"},
+		},
+	}, Delim), nil); err != nil {
+		t.Fatalf("loading: %v", err)
+	}
+
+	doc := map[string]any{
+		"privacy.allow_blocklist": false,
+		"app.notify_emails":       []any{"old@example.test"},
+		"smtp": []any{
+			map[string]any{"port": float64(25), "host": "smtp.yoursite.com"},
+		},
+	}
+
+	Effective(doc, ko, []string{
+		"privacy.allow_blocklist",
+		"app.notify_emails",
+		"smtp.0.port",
+		"smtp.0.host",
+	})
+
+	if got := doc["privacy.allow_blocklist"]; got != true {
+		t.Errorf("allow_blocklist = %#v, want the bool true", got)
+	}
+
+	if got := doc["smtp"].([]any)[0].(map[string]any)["port"]; got != float64(587) {
+		t.Errorf("smtp.0.port = %#v, want a number", got)
+	}
+
+	if got := doc["smtp"].([]any)[0].(map[string]any)["host"]; got != "smtp.azurecomm.net" {
+		t.Errorf("smtp.0.host = %#v", got)
+	}
+
+	// The whole point: the document has to decode back into the typed struct.
+	var into struct {
+		AllowBlocklist bool     `json:"privacy.allow_blocklist"`
+		NotifyEmails   []string `json:"app.notify_emails"`
+		SMTP           []struct {
+			Port int `json:"port"`
+		} `json:"smtp"`
+	}
+
+	b, err := json.Marshal(doc)
+	if err != nil {
+		t.Fatalf("marshal: %v", err)
+	}
+
+	if err := json.Unmarshal(b, &into); err != nil {
+		t.Fatalf("decoding the overlaid document: %v", err)
+	}
+
+	if !into.AllowBlocklist || into.SMTP[0].Port != 587 {
+		t.Errorf("decoded = %+v", into)
+	}
+
+	if len(into.NotifyEmails) != 2 {
+		t.Errorf("notify_emails = %v, want the env list split", into.NotifyEmails)
 	}
 }
