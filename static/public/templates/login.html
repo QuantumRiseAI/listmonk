@@ -3,6 +3,11 @@
 
 <section class="login">
 	<h2>{{ .L.T "users.login"}}</h2>
+
+	{{/* Outside both blocks: OIDCFinish reports its failures through
+	     renderLoginPage, so nesting this in the password form hid every SSO
+	     error wherever password login is disabled. */}}
+	{{ if .Data.Error }}<p><span class="error">{{ .Data.Error }}</span></p>{{ end }}
 	{{ if .Data.PasswordEnabled }}
 	<form method="post" action="/admin/login" class="form">
 		<div>
@@ -16,8 +21,6 @@
 				<label for="password">{{ .L.T "users.password" }}</label>
 				<input id="password" type="password" name="password" required minlength="8" />
 			</p>
-
-			{{ if .Data.Error }}<p><span class="error">{{ .Data.Error }}</span></p>{{ end }}
 
 			<p class="submit"><button class="button" type="submit">{{ .L.T "users.login" }}</button></p>
 		</div>

@@ -69,6 +69,7 @@ func TestLoginPageElementsPerConfiguration(t *testing.T) {
 		passwordForm = `action="/admin/login"`
 		oidcButton   = `action="/auth/oidc"`
 		forgotLink   = `/admin/forgot`
+		errorText    = "nobody by that name"
 	)
 
 	for _, tc := range []struct {
@@ -81,26 +82,26 @@ func TestLoginPageElementsPerConfiguration(t *testing.T) {
 		{
 			// Stock listmonk. Password recovery must survive this fork.
 			name:     "password only",
-			data:     loginData{PasswordEnabled: true},
+			data:     loginData{Error: errorText, PasswordEnabled: true},
 			password: true, forgot: true,
 		},
 		{
 			name:     "password and OIDC",
-			data:     loginData{PasswordEnabled: true, OIDCProvider: "Microsoft"},
+			data:     loginData{Error: errorText, PasswordEnabled: true, OIDCProvider: "Microsoft"},
 			password: true, oidc: true, forgot: true,
 		},
 		{
 			// What this deployment runs. The forgot route 404s here, so
 			// offering it is offering a way in that is not one.
 			name: "OIDC only",
-			data: loginData{OIDCProvider: "Microsoft"},
+			data: loginData{Error: errorText, OIDCProvider: "Microsoft"},
 			oidc: true,
 		},
 		{
 			// Refused at startup by assertALoginPathExists, but the template
 			// should not invent anything if it is ever reached.
 			name: "neither",
-			data: loginData{},
+			data: loginData{Error: errorText},
 		},
 	} {
 		out := render(t, tc.data)
@@ -112,6 +113,10 @@ func TestLoginPageElementsPerConfiguration(t *testing.T) {
 			{passwordForm, tc.password},
 			{oidcButton, tc.oidc},
 			{forgotLink, tc.forgot},
+			// Unconditional: an error is only ever set when there is
+			// something the person signing in needs to read, and the
+			// configuration they are signing in under does not change that.
+			{errorText, true},
 		} {
 			got := strings.Contains(out, check.what)
 			if got != check.want {
