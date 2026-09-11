@@ -22,6 +22,13 @@
 			<p class="submit"><button class="button" type="submit">{{ .L.T "users.login" }}</button></p>
 		</div>
 	</form>
+
+	{{/* Inside the PASSWORD block, not the OIDC one below. /admin/forgot is a
+	     password route, so with password login disabled it 404s. Gating it on
+	     OIDC instead gets it wrong in both directions: every install with
+	     password login on and no OIDC loses password recovery, and the
+	     deployment this was written for still renders a link that 404s. */}}
+	<p class="center small"><a href="{{ .RootURL }}/admin/forgot">{{ .L.T "users.forgotPassword" }}</a></p>
 	{{ end }}
 	
 	{{ if .Data.OIDCProvider }}
@@ -35,10 +42,6 @@
 			</button></p>
 		</div>
 	</form>
-
-	{{/* Inside the block: /admin/forgot is a password route, so with password
-	     login disabled it 404s and the link offers a way in that is not one. */}}
-	<p class="center small"><a href="{{ .RootURL }}/admin/forgot">{{ .L.T "users.forgotPassword" }}</a></p>
 	{{ end }}
 
 </section>
