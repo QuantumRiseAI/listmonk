@@ -74,3 +74,34 @@ azure_use_default_credential_chain = false
 # The first-time setup page is exempt, since it is only reachable while no user
 # exists at all and there would otherwise be no way to create the first one.
 disable_password_login = false
+
+[secrets]
+# Credential fields elsewhere in listmonk — the SMTP password and the OIDC
+# client secret — accept a REFERENCE instead of the secret itself:
+#
+#   akv:https://myvault.vault.azure.net/secrets/smtp-password
+#   akv:https://myvault.vault.azure.net/secrets/smtp-password/<version>
+#
+# The reference is dereferenced in-process, at the moment the credential is
+# used, by the identity listmonk runs as. Anything else that can read where the
+# reference is stored — the settings table, a database backup, the container
+# platform's configuration API — sees a URL rather than a credential.
+#
+# That matters because those settings live in a `settings` table stored as
+# plain JSONB, so a literal secret there is captured by every backup of the
+# database and stays there after the credential is rotated.
+#
+# A value with no `akv:` prefix is used exactly as given, so this changes
+# nothing for an installation that does not use it, and no Azure credential is
+# constructed unless a reference is actually resolved.
+
+# Client ID of a user-assigned managed identity to dereference with. Empty
+# falls back to AZURE_CLIENT_ID, and then to the host's system-assigned
+# identity.
+azure_client_id = ""
+
+# Dereference through the broad DefaultAzureCredential chain rather than
+# managed identity alone, so a local `az login` works. Development only: the
+# chain also honours ambient AZURE_* environment credentials, which would
+# silently outrank the intended managed identity.
+azure_use_default_credential_chain = false
