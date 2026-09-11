@@ -29,11 +29,14 @@ func TestNormalise(t *testing.T) {
 func TestShouldCreate(t *testing.T) {
 	list := []string{"Allowed@X.test", " other@x.test "}
 
+	yes, no := true, false
+
 	for _, tc := range []struct {
-		name  string
-		email string
-		all   bool
-		want  bool
+		name     string
+		email    string
+		verified *bool
+		all      bool
+		want     bool
 	}{
 		{name: "on the list", email: "allowed@x.test", want: true},
 		{name: "on the list, differently cased", email: "ALLOWED@x.test", want: true},
@@ -46,8 +49,18 @@ func TestShouldCreate(t *testing.T) {
 		// An empty address must never match an empty or malformed entry.
 		{name: "empty address", email: "", want: false},
 		{name: "whitespace address", email: "   ", want: false},
+
+		// The provider not saying is permitted; Entra omits the claim for work
+		// accounts, so requiring it would refuse every sign-in there.
+		{name: "verified absent", email: "allowed@x.test", verified: nil, want: true},
+		{name: "verified true", email: "allowed@x.test", verified: &yes, want: true},
+
+		// Explicitly unverified never creates, whichever switch is on: the
+		// mechanism rests on the address identifying a person.
+		{name: "explicitly unverified", email: "allowed@x.test", verified: &no, want: false},
+		{name: "explicitly unverified with auto-create on", email: "anyone@x.test", verified: &no, all: true, want: false},
 	} {
-		if got := ShouldCreate(tc.email, tc.all, list); got != tc.want {
+		if got := ShouldCreate(tc.email, tc.verified, tc.all, list); got != tc.want {
 			t.Errorf("%s: ShouldCreate(%q, %v) = %v, want %v", tc.name, tc.email, tc.all, got, tc.want)
 		}
 	}
@@ -56,7 +69,7 @@ func TestShouldCreate(t *testing.T) {
 // With no allowlist and auto-create off, nobody is created — which is the
 // behaviour every existing install has today.
 func TestShouldCreateDefaultsToNobody(t *testing.T) {
-	if ShouldCreate("anyone@x.test", false, nil) {
+	if ShouldCreate("anyone@x.test", nil, false, nil) {
 		t.Error("ShouldCreate() = true with no allowlist and auto-create off")
 	}
 }

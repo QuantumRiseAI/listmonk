@@ -50,6 +50,7 @@ import (
 	"github.com/knadh/listmonk/internal/messenger/email"
 	"github.com/knadh/listmonk/internal/messenger/postback"
 	"github.com/knadh/listmonk/internal/notifs"
+	"github.com/knadh/listmonk/internal/oidcusers"
 	"github.com/knadh/listmonk/internal/secrets"
 	"github.com/knadh/listmonk/internal/subimporter"
 	"github.com/knadh/listmonk/models"
@@ -589,6 +590,28 @@ func assertALoginPathExists(ko *koanf.Koanf) {
 	if ko.Bool("security.disable_password_login") && !ko.Bool("security.oidc.enabled") {
 		lo.Fatal("security.disable_password_login is set but OIDC is not enabled: " +
 			"that would leave no way to sign in at all")
+	}
+}
+
+// assertOIDCUserCreationIsSane refuses to start when the allowlist would
+// create users into a role that does not exist.
+//
+// UpdateSettings validates default_user_role_id, but only when
+// auto_create_users is on — and the allowlist creates users while it is off,
+// so that check never runs for this path. The schema default is null, which
+// reads as 0, and users.user_role_id has a foreign key to roles(id): the
+// insert would fail and the first sign-in would error out with a database
+// message naming nothing useful. Saying so at startup is cheaper than
+// diagnosing that.
+func assertOIDCUserCreationIsSane(ko *koanf.Koanf) {
+	allowlist := oidcusers.Normalise(ko.Strings("security.oidc.auto_create_emails"))
+	if len(allowlist) == 0 {
+		return
+	}
+
+	if role := ko.Int("security.oidc.default_user_role_id"); role < auth.SuperAdminRoleID {
+		lo.Fatalf("security.oidc.auto_create_emails is set but default_user_role_id is %d: "+
+			"users created on first sign-in would reference a role that does not exist", role)
 	}
 }
 

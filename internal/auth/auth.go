@@ -23,8 +23,13 @@ import (
 )
 
 type OIDCclaim struct {
-	Email             string `json:"email"`
-	EmailVerified     bool   `json:"email_verified"`
+	Email string `json:"email"`
+	// A POINTER so that "the provider said false" is distinguishable from
+	// "the provider did not say". Entra does not emit this for work accounts,
+	// so requiring it outright would refuse every sign-in there; refusing only
+	// an explicit false costs nothing and blocks a provider that permits
+	// self-asserted addresses.
+	EmailVerified     *bool  `json:"email_verified"`
 	Sub               string `json:"sub"`
 	Picture           string `json:"picture"`
 	Name              string `json:"name"`

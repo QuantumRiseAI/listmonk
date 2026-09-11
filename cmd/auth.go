@@ -275,7 +275,7 @@ func (a *App) OIDCFinish(c echo.Context) error {
 		// on the allowlist. The allowlist is what lets SSO be the only way in:
 		// the first sign-in by a named person creates them, with no window
 		// during which anyone the provider authenticates becomes a user.
-		mayCreate := oidcusers.ShouldCreate(email,
+		mayCreate := oidcusers.ShouldCreate(email, claims.EmailVerified,
 			a.cfg.Security.OIDC.AutoCreateUsers, a.cfg.Security.OIDC.AutoCreateEmails)
 
 		if httpErr, ok := userErr.(*echo.HTTPError); ok && httpErr.Code == http.StatusNotFound && mayCreate {

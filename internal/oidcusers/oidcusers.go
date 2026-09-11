@@ -40,9 +40,20 @@ func Normalise(raw []string) []string {
 // ShouldCreate reports whether a first-time sign-in by this address may be
 // turned into a user.
 //
-// autoCreateAll is upstream's existing switch and still wins outright when set,
-// so this only ever widens what was already allowed.
-func ShouldCreate(email string, autoCreateAll bool, allowlist []string) bool {
+// verified is the provider's email_verified claim, nil when it did not send
+// one. An address the provider explicitly marks UNVERIFIED never creates an
+// account, whichever switch is on: the whole mechanism rests on the address
+// identifying a person, and a provider that permits self-asserted addresses
+// would otherwise let anyone claim one on the list. That narrows
+// autoCreateAll slightly, deliberately, and only where a provider says so.
+//
+// nil is treated as permitted, because Entra does not emit the claim for work
+// accounts and requiring it outright would refuse every sign-in there.
+func ShouldCreate(email string, verified *bool, autoCreateAll bool, allowlist []string) bool {
+	if verified != nil && !*verified {
+		return false
+	}
+
 	if autoCreateAll {
 		return true
 	}
