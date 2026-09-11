@@ -5,6 +5,27 @@
 # port, use port 80 (this will require running with elevated permissions).
 address = "localhost:9000"
 
+# Make the environment authoritative over the `settings` table.
+#
+# Normally the settings table — which the admin UI edits — loads last and wins,
+# so a value supplied in LISTMONK_* is overwritten by the database. With this
+# on, the environment is re-applied afterwards and beats it.
+#
+# The reason to want that is credentials. Without it, a secret has to be
+# written into the settings table to take effect, where it is stored as plain
+# JSONB and so ends up in every backup of the database, beyond the reach of
+# rotation. With it, a secret can be delivered to the process from a secret
+# store and never persisted at all.
+#
+# Indexed keys work too: LISTMONK_smtp__0__password overrides the password of
+# the first SMTP block while leaving the rest of that block as the database has
+# it.
+#
+# THE COST: an admin-UI edit to any key that is also set in the environment
+# reverts on the next restart, silently. That is the intent, but it is why this
+# is off by default.
+env_overrides_settings = false
+
 # Database.
 [db]
 host = "localhost"
