@@ -3,6 +3,7 @@ package main
 import (
 	"bytes"
 	"encoding/json"
+	"fmt"
 	"io"
 	"net/http"
 	"net/url"
@@ -22,6 +23,7 @@ import (
 	"github.com/knadh/listmonk/internal/auth"
 	"github.com/knadh/listmonk/internal/messenger/email"
 	"github.com/knadh/listmonk/internal/notifs"
+	"github.com/knadh/listmonk/internal/secrets"
 	"github.com/knadh/listmonk/models"
 	"github.com/labstack/echo/v4"
 )
@@ -250,6 +252,23 @@ func (a *App) UpdateSettings(c echo.Context) error {
 	if set.SecurityCaptcha.HCaptcha.Secret == "" {
 		set.SecurityCaptcha.HCaptcha.Secret = cur.SecurityCaptcha.HCaptcha.Secret
 	}
+	// Secret references are validated BEFORE the write. The value is only
+	// parsed in the process that respawns after this save, and a failure there
+	// is fatal — so a typo'd reference would take the instance down with the
+	// admin UI gone, leaving SQL as the only way to undo it. This is syntax
+	// only: no network call, no vault contact.
+	for i, s := range set.SMTP {
+		if err := secrets.Validate(s.Password); err != nil {
+			return echo.NewHTTPError(http.StatusBadRequest,
+				fmt.Sprintf("smtp[%d].password: %v", i, err))
+		}
+	}
+
+	if err := secrets.Validate(set.OIDC.ClientSecret); err != nil {
+		return echo.NewHTTPError(http.StatusBadRequest,
+			fmt.Sprintf("security.oidc.client_secret: %v", err))
+	}
+
 	if set.OIDC.ClientSecret == "" {
 		set.OIDC.ClientSecret = cur.OIDC.ClientSecret
 	}

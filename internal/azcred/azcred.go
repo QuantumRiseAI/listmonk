@@ -25,6 +25,7 @@ import (
 // is also the conventional way to select an identity, so honouring it is what
 // makes the usual deployment work rather than fail confusingly.
 func ResolveClientID(clientID string) string {
+	clientID = strings.TrimSpace(clientID)
 	if clientID != "" {
 		return clientID
 	}
@@ -38,27 +39,41 @@ func New(clientID string, useDefaultChain bool) (azcore.TokenCredential, error) 
 	clientID = ResolveClientID(clientID)
 
 	if useDefaultChain {
-		// DefaultAzureCredential walks a broad chain that includes ambient
-		// AZURE_* environment variables and a developer's local `az login`.
-		// That is convenient on a laptop but wrong as a default for a service
-		// credential: a stray AZURE_CLIENT_SECRET in the environment would
-		// silently outrank the intended managed identity, and a developer
-		// running the binary would authenticate as themselves rather than as
-		// the app. So the narrow credential is the default and this one has to
-		// be asked for by name.
+		// A broad chain is convenient on a laptop but wrong as a default for a
+		// service credential: a stray AZURE_CLIENT_SECRET in the environment
+		// would silently outrank the intended managed identity, and a
+		// developer running the binary would authenticate as themselves rather
+		// than as the app. So the narrow credential is the default and this
+		// one has to be asked for by name.
 		//
-		// DefaultAzureCredentialOptions carries no field for a user-assigned
-		// identity, so this path can only take one from AZURE_CLIENT_ID in the
-		// environment. Set it from the configured value when there is one, so
-		// the setting means the same thing on both paths.
-		if clientID != "" {
-			if err := os.Setenv("AZURE_CLIENT_ID", clientID); err != nil {
-				return nil, fmt.Errorf("error setting AZURE_CLIENT_ID for the credential chain: %w", err)
-			}
+		// Built explicitly rather than with DefaultAzureCredential, which
+		// carries no field for a user-assigned identity and can only take one
+		// from AZURE_CLIENT_ID. Reaching that meant os.Setenv — a
+		// process-global write, from a function with two call sites that can
+		// pass different client ids, and one that outlives its caller because
+		// a settings save re-execs the process. A chain of the two credentials
+		// actually wanted has neither problem.
+		managed, err := newManagedIdentity(clientID)
+		if err != nil {
+			return nil, err
 		}
 
-		return azidentity.NewDefaultAzureCredential(nil)
+		cli, err := azidentity.NewAzureCLICredential(nil)
+		if err != nil {
+			return nil, fmt.Errorf("error building the CLI credential: %w", err)
+		}
+
+		return azidentity.NewChainedTokenCredential(
+			[]azcore.TokenCredential{managed, cli}, nil,
+		)
 	}
+
+	return newManagedIdentity(clientID)
+}
+
+// newManagedIdentity builds the narrow credential. With no ID set, this
+// resolves the host's system-assigned identity.
+func newManagedIdentity(clientID string) (azcore.TokenCredential, error) {
 
 	opts := &azidentity.ManagedIdentityCredentialOptions{}
 	if clientID != "" {

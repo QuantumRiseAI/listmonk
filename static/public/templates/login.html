@@ -35,9 +35,11 @@
 			</button></p>
 		</div>
 	</form>
-	{{ end }}
 
+	{{/* Inside the block: /admin/forgot is a password route, so with password
+	     login disabled it 404s and the link offers a way in that is not one. */}}
 	<p class="center small"><a href="{{ .RootURL }}/admin/forgot">{{ .L.T "users.forgotPassword" }}</a></p>
+	{{ end }}
 
 </section>
 

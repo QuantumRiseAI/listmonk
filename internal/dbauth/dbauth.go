@@ -140,9 +140,9 @@ var encryptingSSLModes = map[string]bool{
 	"verify-full": true,
 }
 
-// RequireEncryptedSSLMode rejects an sslmode that permits an unencrypted
-// connection, which under token authentication is a materially worse problem
-// than it is under a password.
+// RequireEncryptedDSN rejects an assembled DSN whose effective sslmode permits
+// an unencrypted connection, which under token authentication is a materially
+// worse problem than it is under a password.
 //
 // The token IS the credential and travels as the DSN password, so a cleartext
 // connection puts a bearer token on the wire — replayable by anyone who saw it
@@ -150,20 +150,48 @@ var encryptingSSLModes = map[string]bool{
 // tokens. A leaked password, by contrast, is useless against a server with
 // password authentication disabled. Upstream's sample ships
 // `ssl_mode = "disable"`, so this is a live default rather than a hypothetical.
-func RequireEncryptedSSLMode(sslMode string) error {
-	mode := strings.ToLower(strings.TrimSpace(sslMode))
+//
+// IT TAKES THE WHOLE DSN, not the ssl_mode field, and that is the point.
+// `db.params` is appended to the DSN after the individual fields and libpq is
+// last-key-wins, so validating the field alone leaves
+//
+//	ssl_mode = "require"
+//	params   = "sslmode=disable"
+//
+// passing while the connection is in fact cleartext — defeating this check
+// with configuration rather than by evading it.
+func RequireEncryptedDSN(dsn string) error {
+	mode := effectiveSSLMode(dsn)
+
 	if mode == "" {
-		return fmt.Errorf("db.ssl_mode is unset, which libpq treats as %q and allows falling back to "+
-			"cleartext; %q requires one of require, verify-ca or verify-full", "prefer", ModeAzureManagedIdentity)
+		return fmt.Errorf("no sslmode in the database DSN, which libpq treats as %q and allows falling "+
+			"back to cleartext; %q requires one of require, verify-ca or verify-full",
+			"prefer", ModeAzureManagedIdentity)
 	}
 
 	if !encryptingSSLModes[mode] {
-		return fmt.Errorf("db.ssl_mode %q permits an unencrypted connection, which would put the Entra "+
-			"token on the wire in cleartext; %q requires one of require, verify-ca or verify-full",
-			sslMode, ModeAzureManagedIdentity)
+		return fmt.Errorf("the database DSN's effective sslmode is %q, which permits an unencrypted "+
+			"connection and would put the Entra token on the wire in cleartext; %q requires one of "+
+			"require, verify-ca or verify-full (check db.ssl_mode AND db.params, the later wins)",
+			mode, ModeAzureManagedIdentity)
 	}
 
 	return nil
+}
+
+// effectiveSSLMode returns the sslmode libpq would actually use: the LAST one
+// in the DSN, since later keys win.
+func effectiveSSLMode(dsn string) string {
+	mode := ""
+
+	for _, field := range strings.Fields(dsn) {
+		key, value, found := strings.Cut(field, "=")
+		if found && strings.EqualFold(strings.TrimSpace(key), "sslmode") {
+			mode = strings.ToLower(strings.Trim(strings.TrimSpace(value), "'\""))
+		}
+	}
+
+	return mode
 }
 
 // NormaliseMode canonicalises the configured auth mode, defaulting to password
