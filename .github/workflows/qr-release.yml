@@ -75,7 +75,7 @@ jobs:
       # `pull_request: types: [opened]` only and runs `make dist`. Gating the
       # release on them is what stops the tests being documentation.
       - name: Test
-        run: go test -count=1 ./internal/dbauth/...
+        run: go test -count=1 ./internal/...
 
       # `make dist` builds the frontend with yarn, compiles the binary, then
       # stuffbin-packs the static assets into it. The Dockerfile is a thin
@@ -105,6 +105,11 @@ jobs:
           # compiled in — which grepping the config sample does not.
           strings ./listmonk | grep -q 'ossrdbms-aad.database.windows.net'
 
+          # And the secret-reference resolver. A separate string from a separate
+          # package, because the check above proves only the database patch and
+          # would pass a build that silently lacked this one.
+          strings ./listmonk | grep -q 'vault.usgovcloudapi.net'
+
           # The config surface travels inside the binary. Rendered from a
           # directory holding no config.toml.sample, so the output can only
           # have come from the stuffbin-packed copy; run from the repo root it
@@ -113,6 +118,7 @@ jobs:
           (cd "$probe" && "${GITHUB_WORKSPACE}/listmonk" --new-config --config probe.toml)
           grep -q 'auth_mode' "$probe/probe.toml"
           grep -q 'disable_password_login' "$probe/probe.toml"
+          grep -q 'secrets.azure_client_id\|azure_client_id' "$probe/probe.toml"
 
       - name: Azure login (OIDC)
         uses: azure/login@7ddb5af1ef8758cf1353cf3b42f940aee27ba21c # v3.0.2

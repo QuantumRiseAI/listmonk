@@ -92,29 +92,39 @@ func TestDSNWithToken(t *testing.T) {
 	}
 }
 
-func TestRequireEncryptedSSLMode(t *testing.T) {
+// Takes the whole DSN, because db.params is appended after the fields and
+// libpq is last-key-wins — so a check on the field alone is defeated by
+// configuration rather than evaded.
+func TestRequireEncryptedDSN(t *testing.T) {
+	const base = "host=db user=listmonk-mi dbname=listmonk"
+
 	for _, tc := range []struct {
-		in      string
+		name    string
+		dsn     string
 		wantErr bool
 	}{
-		// Unset is `prefer` to libpq, which falls back to cleartext.
-		{in: "", wantErr: true},
-		{in: "disable", wantErr: true},
-		{in: "allow", wantErr: true},
-		{in: "prefer", wantErr: true},
-		{in: "require"},
-		{in: "REQUIRE"},
-		{in: "  verify-ca  "},
-		{in: "verify-full"},
+		{name: "absent", dsn: base, wantErr: true},
+		{name: "disable", dsn: base + " sslmode=disable", wantErr: true},
+		{name: "allow", dsn: base + " sslmode=allow", wantErr: true},
+		{name: "prefer", dsn: base + " sslmode=prefer", wantErr: true},
+		{name: "require", dsn: base + " sslmode=require"},
+		{name: "uppercase", dsn: base + " sslmode=REQUIRE"},
+		{name: "verify-ca", dsn: base + " sslmode=verify-ca"},
+		{name: "verify-full", dsn: base + " sslmode=verify-full"},
+
+		// The finding this replaced a field check for: db.params wins.
+		{name: "params override a good field", dsn: base + " sslmode=require sslmode=disable", wantErr: true},
+		// And the reverse, so a params value can also be the one that saves it.
+		{name: "params override a bad field", dsn: base + " sslmode=disable sslmode=require"},
 	} {
-		err := RequireEncryptedSSLMode(tc.in)
+		err := RequireEncryptedDSN(tc.dsn)
 
 		if tc.wantErr && err == nil {
-			t.Errorf("RequireEncryptedSSLMode(%q): expected an error", tc.in)
+			t.Errorf("%s: expected an error for %q", tc.name, tc.dsn)
 		}
 
 		if !tc.wantErr && err != nil {
-			t.Errorf("RequireEncryptedSSLMode(%q): unexpected error: %v", tc.in, err)
+			t.Errorf("%s: unexpected error for %q: %v", tc.name, tc.dsn, err)
 		}
 	}
 }

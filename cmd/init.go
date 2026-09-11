@@ -410,11 +410,6 @@ func initDB() *sqlx.DB {
 				dbauth.ModeAzureManagedIdentity)
 		}
 
-		// The token travels as the DSN password, so an sslmode permitting
-		// cleartext would put a bearer credential on the wire.
-		if err := dbauth.RequireEncryptedSSLMode(c.SSLMode); err != nil {
-			lo.Fatalf("error loading db config: %v", err)
-		}
 	}
 
 	var parts []string
@@ -431,6 +426,16 @@ func initDB() *sqlx.DB {
 	}
 
 	dsn := strings.Join(parts, " ")
+
+	if authMode == dbauth.ModeAzureManagedIdentity {
+		// Checked on the ASSEMBLED DSN rather than on db.ssl_mode, because
+		// db.params is appended after the individual fields and libpq is
+		// last-key-wins: `params = "sslmode=disable"` would otherwise defeat a
+		// `ssl_mode = "require"` and put the token on the wire in cleartext.
+		if err := dbauth.RequireEncryptedDSN(dsn); err != nil {
+			lo.Fatalf("error loading db config: %v", err)
+		}
+	}
 
 	var db *sqlx.DB
 	if authMode == dbauth.ModeAzureManagedIdentity {
@@ -563,6 +568,20 @@ func assertNoUIOverridableKillSwitch(settings map[string]any) {
 			lo.Fatalf("the settings table's `security` row carries %q, which would override the "+
 				"config-file kill switch; remove it", key)
 		}
+	}
+}
+
+// assertALoginPathExists refuses to start with no way in at all.
+//
+// disable_password_login closes the username/password routes; OIDC disabled
+// closes the other one. Together they render a login page offering nothing,
+// and since the switch is config-only the recovery is to edit config and
+// restart — findable, but only if you know that is what happened. A fatal at
+// startup says so instead.
+func assertALoginPathExists(ko *koanf.Koanf) {
+	if ko.Bool("security.disable_password_login") && !ko.Bool("security.oidc.enabled") {
+		lo.Fatal("security.disable_password_login is set but OIDC is not enabled: " +
+			"that would leave no way to sign in at all")
 	}
 }
 

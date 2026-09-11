@@ -52,17 +52,17 @@ jobs:
       - name: Format
         run: |
           set -euo pipefail
-          unformatted="$(gofmt -l cmd internal/dbauth)"
+          unformatted="$(gofmt -l cmd internal)"
           if [ -n "$unformatted" ]; then
             echo "::error::gofmt needed on:"$'\n'"$unformatted" >&2
             exit 1
           fi
 
       - name: Vet
-        run: go vet ./cmd/ ./internal/dbauth/
+        run: go vet ./cmd/ ./internal/...
 
       - name: Test
-        run: go test -count=1 ./internal/dbauth/...
+        run: go test -count=1 ./internal/...
 
       - name: Build
         run: go build ./...

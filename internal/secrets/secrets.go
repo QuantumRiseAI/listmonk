@@ -40,6 +40,36 @@ const Scheme = "akv:"
 // vault is normally single-digit milliseconds away.
 const fetchTimeout = 30 * time.Second
 
+// Bounded retry across that window, since the caller treats failure as fatal.
+const (
+	fetchAttempts = 3
+	fetchBackoff  = time.Second
+)
+
+// Host suffixes Key Vault is served from, across the public and sovereign
+// clouds. A reference to anything else is refused.
+var vaultHostSuffixes = []string{
+	".vault.azure.net",
+	".vault.azure.cn",
+	".vault.usgovcloudapi.net",
+	".vault.microsoftazure.de",
+}
+
+func isVaultHost(host string) bool {
+	host = strings.ToLower(host)
+	if h, _, found := strings.Cut(host, ":"); found {
+		host = h
+	}
+
+	for _, suffix := range vaultHostSuffixes {
+		if strings.HasSuffix(host, suffix) {
+			return true
+		}
+	}
+
+	return false
+}
+
 // getter fetches one secret. Declared so tests need no vault.
 type getter interface {
 	get(ctx context.Context, vaultURL, name, version string) (string, error)
@@ -49,6 +79,9 @@ type getter interface {
 // NewResolver.
 type Resolver struct {
 	get getter
+
+	// Injectable so tests do not pay the retry backoff.
+	backoff time.Duration
 
 	// Vault clients are safe to reuse and cheap to keep, and a campaign send
 	// resolving the same reference repeatedly should not re-authenticate.
@@ -61,8 +94,9 @@ type Resolver struct {
 // an installation using no references never needs a credential at all.
 func NewResolver(clientID string, useDefaultChain bool) *Resolver {
 	return &Resolver{
-		get:    &azureGetter{clientID: clientID, useDefaultChain: useDefaultChain},
-		cached: map[string]string{},
+		get:     &azureGetter{clientID: clientID, useDefaultChain: useDefaultChain},
+		backoff: fetchBackoff,
+		cached:  map[string]string{},
 	}
 }
 
@@ -96,12 +130,36 @@ func (r *Resolver) Resolve(ctx context.Context, value string) (string, error) {
 	ctx, cancel := context.WithTimeout(ctx, fetchTimeout)
 	defer cancel()
 
-	// Deliberately does not name the vault or secret in the error: this runs on
-	// a startup path whose failures get logged, and the reference identifies
-	// which credential is missing to anyone reading those logs.
-	resolved, err := r.get.get(ctx, vaultURL, name, version)
+	// Retried, because the caller treats a failure as fatal and every settings
+	// save re-execs the process: a single throttled or 503 response from the
+	// vault at the wrong moment would otherwise take the instance down and keep
+	// it down. Upstream's other fatal config errors are deterministic; this one
+	// depends on a remote service.
+
+	// The error is wrapped as-is, reference and all. An earlier version claimed
+	// to keep the vault and secret name out of it, which was both unachievable
+	// — azcore's ResponseError prints the request URL — and pointless: a
+	// reference is a URL that already sits in the settings table by design. An
+	// operator debugging a 403 needs to see which secret it was.
+	var resolved string
+
+	for attempt := range fetchAttempts {
+		if attempt > 0 {
+			select {
+			case <-time.After(r.backoff * time.Duration(attempt)):
+			case <-ctx.Done():
+				return "", fmt.Errorf("error resolving secret reference: %w", ctx.Err())
+			}
+		}
+
+		resolved, err = r.get.get(ctx, vaultURL, name, version)
+		if err == nil {
+			break
+		}
+	}
+
 	if err != nil {
-		return "", fmt.Errorf("error resolving secret reference: %w", err)
+		return "", fmt.Errorf("error resolving secret reference after %d attempts: %w", fetchAttempts, err)
 	}
 
 	r.mu.Lock()
@@ -125,6 +183,16 @@ func parse(reference string) (vaultURL, name, version string, err error) {
 
 	if u.Scheme != "https" || u.Host == "" {
 		return "", "", "", fmt.Errorf("secret reference must be an https vault URL, got %q", u.Scheme)
+	}
+
+	// The host is restricted, not merely required. A reference is stored in a
+	// settings field an admin can edit, so without this an admin could point a
+	// credential at any host and have the process fetch it from inside the
+	// VNet and log the response — blind SSRF with reflection, even though Key
+	// Vault's challenge-resource check makes the token itself hard to
+	// exfiltrate.
+	if !isVaultHost(u.Host) {
+		return "", "", "", fmt.Errorf("secret reference host is not a Key Vault")
 	}
 
 	parts := strings.Split(strings.Trim(u.Path, "/"), "/")
@@ -189,4 +257,22 @@ func (g *azureGetter) clientFor(vaultURL string) (*azsecrets.Client, error) {
 	actual, _ := g.clients.LoadOrStore(vaultURL, client)
 
 	return actual.(*azsecrets.Client), nil
+}
+
+// Validate reports whether a configured value is usable: either a literal, or
+// a reference this package can resolve.
+//
+// Syntax only, with no network call, so it is safe to run on the write path.
+// That is the point of it — a reference is otherwise first parsed by the
+// process that respawns after a settings save, where a failure is fatal and
+// takes the admin UI with it, leaving SQL as the only way to remove the bad
+// value.
+func Validate(value string) error {
+	if !IsReference(value) {
+		return nil
+	}
+
+	_, _, _, err := parse(strings.TrimSpace(value))
+
+	return err
 }

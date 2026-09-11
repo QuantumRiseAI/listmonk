@@ -27,7 +27,8 @@ func (f *fakeGetter) get(_ context.Context, vaultURL, name, version string) (str
 }
 
 func newTestResolver(g getter) *Resolver {
-	return &Resolver{get: g, cached: map[string]string{}}
+	// Zero backoff: the retry behaviour is asserted, not waited on.
+	return &Resolver{get: g, backoff: 0, cached: map[string]string{}}
 }
 
 // The whole design rests on a value with no scheme being untouched, so that
@@ -161,4 +162,71 @@ func TestIsReference(t *testing.T) {
 			t.Errorf("IsReference(%q) = %v, want %v", in, got, want)
 		}
 	}
+}
+
+// A reference is stored in a settings field an admin can edit, so the host is
+// restricted rather than merely required — otherwise a credential could be
+// pointed at any host and fetched from inside the network.
+func TestResolveRejectsANonVaultHost(t *testing.T) {
+	for _, in := range []string{
+		"akv:https://evil.example.com/secrets/x",
+		"akv:https://169.254.169.254/secrets/x",
+		"akv:https://myvault.vault.azure.net.evil.com/secrets/x",
+	} {
+		g := &fakeGetter{value: "unused"}
+
+		if _, err := newTestResolver(g).Resolve(context.Background(), in); err == nil {
+			t.Errorf("Resolve(%q) succeeded, want the host refused", in)
+		}
+
+		if g.calls != 0 {
+			t.Errorf("Resolve(%q) made a request to a non-vault host", in)
+		}
+	}
+}
+
+func TestResolveAcceptsSovereignVaultHosts(t *testing.T) {
+	for _, host := range []string{
+		"v.vault.azure.net", "v.vault.azure.cn",
+		"v.vault.usgovcloudapi.net", "v.vault.microsoftazure.de",
+	} {
+		g := &fakeGetter{value: "ok"}
+
+		if _, err := newTestResolver(g).Resolve(context.Background(), "akv:https://"+host+"/secrets/x"); err != nil {
+			t.Errorf("Resolve() refused %s: %v", host, err)
+		}
+	}
+}
+
+// The caller treats a failure as fatal and a settings save re-execs the
+// process, so a single transient vault error must not be terminal.
+func TestResolveRetriesATransientFailure(t *testing.T) {
+	g := &failTwiceGetter{value: "eventually"}
+	r := newTestResolver(g)
+
+	got, err := r.Resolve(context.Background(), "akv:https://v.vault.azure.net/secrets/x")
+	if err != nil {
+		t.Fatalf("Resolve: %v", err)
+	}
+
+	if got != "eventually" {
+		t.Errorf("Resolve() = %q, want the value from the successful attempt", got)
+	}
+
+	if g.calls != 3 {
+		t.Errorf("attempted %d times, want 3", g.calls)
+	}
+}
+
+type failTwiceGetter struct {
+	calls int
+	value string
+}
+
+func (f *failTwiceGetter) get(_ context.Context, _, _, _ string) (string, error) {
+	f.calls++
+	if f.calls < 3 {
+		return "", errors.New("throttled")
+	}
+	return f.value, nil
 }

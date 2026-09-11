@@ -67,6 +67,16 @@ params = ""
 # above is fine for a password on a trusted network and is not fine here.
 auth_mode = "password"
 
+# NOTE ALSO that the official image COPYs this sample to config.toml, so a
+# container starts with `password = "listmonk"` already set and
+# "azure_managed_identity" refuses to start on it — the empty-password check
+# fires on the baked default rather than on anything you chose. Set
+# LISTMONK_db__password to the empty string to clear it.
+#
+# The sslmode requirement is checked against the ASSEMBLED DSN, not this field,
+# because `params` below is appended after it and libpq is last-key-wins: an
+# `sslmode=` in params would otherwise quietly defeat it.
+
 # Client ID of a user-assigned managed identity to authenticate as. Leave empty
 # to use the host's system-assigned identity. Applies to
 # auth_mode = "azure_managed_identity" only.
@@ -115,6 +125,16 @@ disable_password_login = false
 # A value with no `akv:` prefix is used exactly as given, so this changes
 # nothing for an installation that does not use it, and no Azure credential is
 # constructed unless a reference is actually resolved.
+#
+# The host must be a Key Vault: a reference is stored in a settings field an
+# admin can edit, so an arbitrary host would let a credential field become an
+# outbound request from wherever listmonk runs.
+#
+# A resolved value is cached for the LIFETIME OF THE PROCESS. An unversioned
+# reference therefore means "latest as of startup" rather than "always latest":
+# rotating the secret in the vault needs a restart to take effect. Since a
+# settings save re-execs listmonk anyway, in practice that is a restart you
+# were going to do.
 
 # Client ID of a user-assigned managed identity to dereference with. Empty
 # falls back to AZURE_CLIENT_ID, and then to the host's system-assigned

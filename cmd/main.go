@@ -194,6 +194,11 @@ func init() {
 		}
 	}
 
+	// AFTER the re-apply, not merely after the settings load. OIDC can be
+	// enabled from the environment, so checking before it would read a stale
+	// `enabled` and refuse to start over a lockout that is not there.
+	assertALoginPathExists(ko)
+
 	// Prepare queries.
 	queries = prepareQueries(qMap, db, ko)
 }
