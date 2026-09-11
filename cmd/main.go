@@ -198,6 +198,7 @@ func init() {
 	// enabled from the environment, so checking before it would read a stale
 	// `enabled` and refuse to start over a lockout that is not there.
 	assertALoginPathExists(ko)
+	assertOIDCUserCreationIsSane(ko)
 
 	// Prepare queries.
 	queries = prepareQueries(qMap, db, ko)

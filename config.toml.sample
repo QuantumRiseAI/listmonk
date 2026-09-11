@@ -106,6 +106,31 @@ azure_use_default_credential_chain = false
 # exists at all and there would otherwise be no way to create the first one.
 disable_password_login = false
 
+# Addresses that may be created as users on their first SSO sign-in, even with
+# security.oidc.auto_create_users off.
+#
+# This is what makes SSO usable as the only way in. Upstream offers one
+# control: auto_create_users on, and anyone the identity provider will
+# authenticate becomes a user — on a single-tenant registration, every
+# employee; or off, and every user must be created through the admin UI, which
+# needs a user to already exist. A fresh install with SSO as its only login has
+# no way in at all.
+#
+# The allowlist is the gap between them: these people may sign in and be
+# created, nobody else. Bootstrap and access control in one setting, declarable
+# wherever the deployment is described rather than a state somebody remembers
+# to turn back off.
+#
+# Created users get security.oidc.default_user_role_id, so set that to the role
+# these people should hold.
+#
+# Accepts a list, or a comma-separated string — an environment variable can
+# only be the latter.
+#
+#   auto_create_emails = ["a@example.com", "b@example.com"]
+#
+# Empty by default, so nothing changes for an existing install.
+
 [secrets]
 # Credential fields elsewhere in listmonk — the SMTP password and the OIDC
 # client secret — accept a REFERENCE instead of the secret itself:
