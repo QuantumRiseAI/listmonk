@@ -16,14 +16,13 @@ import (
 	"database/sql"
 	"database/sql/driver"
 	"fmt"
-	"os"
 	"strings"
 	"time"
 
 	"github.com/Azure/azure-sdk-for-go/sdk/azcore"
 	"github.com/Azure/azure-sdk-for-go/sdk/azcore/policy"
-	"github.com/Azure/azure-sdk-for-go/sdk/azidentity"
 	"github.com/jmoiron/sqlx"
+	"github.com/knadh/listmonk/internal/azcred"
 	"github.com/lib/pq"
 )
 
@@ -97,67 +96,10 @@ func quoteDSNValue(v string) string {
 	return "'" + strings.NewReplacer(`\`, `\\`, `'`, `\'`).Replace(v) + "'"
 }
 
-// resolveClientID picks the managed identity to authenticate as, preferring
-// the explicit setting and falling back to AZURE_CLIENT_ID.
-//
-// The fallback is not a convenience. ManagedIdentityCredential does NOT read
-// AZURE_CLIENT_ID — that is DefaultAzureCredential behaviour — so with neither
-// set it silently resolves the host's *system-assigned* identity. A Container
-// App with only user-assigned identities has none, so the failure is an
-// unhelpful IMDS error at startup rather than anything naming the cause.
-//
-// AZURE_CLIENT_ID is also exactly how the surrounding estate selects an
-// identity for passwordless Postgres, so honouring it is what makes the
-// house pattern work rather than fail confusingly.
-func resolveClientID(clientID string) string {
-	if clientID != "" {
-		return clientID
-	}
-
-	return strings.TrimSpace(os.Getenv("AZURE_CLIENT_ID"))
-}
-
-// newAzureCredential builds the credential used to mint database tokens.
-// Managed identity is the default and the broad chain is opt-in.
-func newAzureCredential(clientID string, useDefaultChain bool) (tokenCredential, error) {
-	clientID = resolveClientID(clientID)
-
-	if useDefaultChain {
-		// DefaultAzureCredential walks a broad chain that includes ambient
-		// AZURE_* environment variables and a developer's local `az login`.
-		// That is convenient on a laptop but wrong as a default for a database
-		// credential: a stray AZURE_CLIENT_SECRET in the environment would
-		// silently outrank the intended managed identity, and a developer
-		// running the binary would connect as themselves rather than as the
-		// app. So the narrow credential is the default and this one has to be
-		// asked for by name.
-		//
-		// DefaultAzureCredentialOptions carries no field for a user-assigned
-		// identity, so this path can only take one from AZURE_CLIENT_ID in the
-		// environment. Set it from the config value when the config supplied
-		// one, so db.azure_client_id means the same thing on both paths.
-		if clientID != "" {
-			if err := os.Setenv("AZURE_CLIENT_ID", clientID); err != nil {
-				return nil, fmt.Errorf("error setting AZURE_CLIENT_ID for the credential chain: %w", err)
-			}
-		}
-
-		return azidentity.NewDefaultAzureCredential(nil)
-	}
-
-	opts := &azidentity.ManagedIdentityCredentialOptions{}
-	if clientID != "" {
-		opts.ID = azidentity.ClientID(clientID)
-	}
-
-	// With no ID set, this resolves the host's system-assigned identity.
-	return azidentity.NewManagedIdentityCredential(opts)
-}
-
 // OpenAzureManagedIdentity opens a connection pool that authenticates with
 // Entra ID tokens instead of a password. The DSN must carry no password field.
 func OpenAzureManagedIdentity(dsn, clientID string, useDefaultChain bool) (*sqlx.DB, error) {
-	cred, err := newAzureCredential(clientID, useDefaultChain)
+	cred, err := azcred.New(clientID, useDefaultChain)
 	if err != nil {
 		return nil, fmt.Errorf("error initialising Azure credential: %w", err)
 	}

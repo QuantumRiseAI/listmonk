@@ -2,6 +2,7 @@ package main
 
 import (
 	"bytes"
+	"context"
 	"crypto/md5"
 	"database/sql"
 	"encoding/json"
@@ -19,6 +20,7 @@ import (
 	"runtime"
 	"strconv"
 	"strings"
+	"sync"
 	"syscall"
 	"time"
 
@@ -48,6 +50,7 @@ import (
 	"github.com/knadh/listmonk/internal/messenger/email"
 	"github.com/knadh/listmonk/internal/messenger/postback"
 	"github.com/knadh/listmonk/internal/notifs"
+	"github.com/knadh/listmonk/internal/secrets"
 	"github.com/knadh/listmonk/internal/subimporter"
 	"github.com/knadh/listmonk/models"
 	"github.com/knadh/stuffbin"
@@ -314,6 +317,41 @@ func initFS(appDir, frontendDir, staticDir, i18nDir string) stuffbin.FileSystem 
 	}
 
 	return fs
+}
+
+// secretResolver dereferences `akv:` secret references in configuration
+// values. Built lazily and shared, so an installation using none of them never
+// constructs an Azure credential.
+//
+// A credential stored by reference stays out of the settings table, and so out
+// of every backup of it — and out of the container platform's secret store,
+// whose management API resolves references for anyone holding a broad
+// subscription role. Only the identity this process runs as can dereference it.
+var (
+	secretResolverOnce sync.Once
+	secretResolver     *secrets.Resolver
+)
+
+func resolveSecret(value string) string {
+	if !secrets.IsReference(value) {
+		return value
+	}
+
+	secretResolverOnce.Do(func() {
+		secretResolver = secrets.NewResolver(
+			ko.String("secrets.azure_client_id"),
+			ko.Bool("secrets.azure_use_default_credential_chain"),
+		)
+	})
+
+	resolved, err := secretResolver.Resolve(context.Background(), value)
+	if err != nil {
+		// Fatal rather than falling back to the reference, which would be sent
+		// as a password and fail somewhere far less legible.
+		lo.Fatalf("%v", err)
+	}
+
+	return resolved
 }
 
 // initDB initializes the main DB connection pool and parse and loads the app's
@@ -756,6 +794,10 @@ func initSMTPMessengers() []manager.Messenger {
 			lo.Fatalf("error reading SMTP config: %v", err)
 		}
 
+		// Resolved here rather than at load, so a reference can be stored in
+		// the settings table like any other value.
+		s.Password = resolveSecret(s.Password)
+
 		servers = append(servers, s)
 		lo.Printf("initialized email (SMTP) messenger: %s@%s", item.String("username"), item.String("host"))
 
@@ -1192,7 +1234,7 @@ func initAuth(co *core.Core, db *sql.DB, ko *koanf.Koanf) (bool, *auth.Auth) {
 			Enabled:           true,
 			ProviderURL:       ko.String("security.oidc.provider_url"),
 			ClientID:          ko.String("security.oidc.client_id"),
-			ClientSecret:      ko.String("security.oidc.client_secret"),
+			ClientSecret:      resolveSecret(ko.String("security.oidc.client_secret")),
 			AutoCreateUsers:   ko.Bool("security.oidc.auto_create_users"),
 			DefaultUserRoleID: ko.Int("security.oidc.default_user_role_id"),
 			DefaultListRoleID: ko.Int("security.oidc.default_list_role_id"),
