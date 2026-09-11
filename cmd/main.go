@@ -13,13 +13,13 @@ import (
 	"time"
 
 	"github.com/jmoiron/sqlx"
-	"github.com/knadh/koanf/providers/env"
 	"github.com/knadh/koanf/v2"
 	"github.com/knadh/listmonk/internal/auth"
 	"github.com/knadh/listmonk/internal/bounce"
 	"github.com/knadh/listmonk/internal/buflog"
 	"github.com/knadh/listmonk/internal/captcha"
 	"github.com/knadh/listmonk/internal/core"
+	"github.com/knadh/listmonk/internal/envcfg"
 	"github.com/knadh/listmonk/internal/events"
 	"github.com/knadh/listmonk/internal/i18n"
 	"github.com/knadh/listmonk/internal/manager"
@@ -119,20 +119,11 @@ func init() {
 	// Load config files to pick up the database settings first.
 	initConfigFiles(ko.Strings("config"), ko)
 
-	// Load environment variables and merge into the loaded config.
-	// LISTMONK_foo__bar -> foo.bar (double underscore becomes dot for nested config)
-	// LISTMONK_static_dir -> static-dir (top-level keys with underscore become hyphen for CLI flags)
-	if err := ko.Load(env.Provider("LISTMONK_", ".", func(s string) string {
-		key := strings.ToLower(strings.TrimPrefix(s, "LISTMONK_"))
-		key = strings.Replace(key, "__", ".", -1)
-		// Only convert underscore to hyphen for top-level keys (CLI flags like static-dir, i18n-dir)
-		// Nested config keys (containing dots) keep underscores (e.g., db.ssl_mode)
-		if !strings.Contains(key, ".") {
-			key = strings.Replace(key, "_", "-", -1)
-		}
-		return key
-	}), nil); err != nil {
-		lo.Fatalf("error loading config from env: %v", err)
+	// Load environment variables and merge into the loaded config. The mapping
+	// lives in internal/envcfg because it is applied twice — here, and
+	// optionally again after the settings table loads.
+	if err := envcfg.Load(ko); err != nil {
+		lo.Fatalf("%v", err)
 	}
 
 	// Connect to the database.
@@ -184,6 +175,23 @@ func init() {
 	// Load settings from DB.
 	if q, ok := qMap["get-settings"]; ok {
 		initSettings(q.Query, db, ko)
+	}
+
+	// Optionally put the environment back on top of the settings table.
+	//
+	// Off by default, so the ordinary behaviour — the database wins, and the
+	// admin UI is where settings are edited — is unchanged. Turned on, a
+	// credential can be delivered from a secret store and never written to the
+	// database, where settings are stored as plain JSONB and so are captured by
+	// every backup, beyond the reach of rotation.
+	//
+	// The cost is that an admin-UI edit to any env-set key reverts on the next
+	// restart. That is the intent rather than a side effect, but it is why this
+	// is opt-in.
+	if ko.Bool("app.env_overrides_settings") {
+		if err := envcfg.Reapply(ko); err != nil {
+			lo.Fatalf("%v", err)
+		}
 	}
 
 	// Prepare queries.
