@@ -248,8 +248,8 @@ func Effective(doc map[string]any, ko *koanf.Koanf, keys []string) {
 	slices := map[string][]*koanf.Koanf{}
 
 	for _, key := range keys {
-		if _, ok := doc[key]; ok {
-			doc[key] = ko.Get(key)
+		if existing, ok := doc[key]; ok {
+			doc[key] = valueLike(existing, ko, key)
 			continue
 		}
 
@@ -287,6 +287,57 @@ func Effective(doc map[string]any, ko *koanf.Koanf, keys []string) {
 			continue
 		}
 
-		element[field] = running[index].Get(field)
+		element[field] = valueLike(element[field], running[index], field)
 	}
+}
+
+// valueLike reads key from ko as the type the settings document already
+// holds there.
+//
+// Every environment value is a string, so a plain Get puts "true" where the
+// settings struct has a bool and unmarshalling the document back fails on the
+// first such key. The stored value is the only statement of the intended type
+// available here, which is enough: it came from the same struct.
+func valueLike(existing any, ko *koanf.Koanf, key string) any {
+	switch existing.(type) {
+	case bool:
+		return ko.Bool(key)
+	case float64:
+		return ko.Float64(key)
+	case []any:
+		return list(ko, key)
+	case string:
+		return ko.String(key)
+	default:
+		// null, or a nested object. Nothing delivers one of those by
+		// environment today, and Effective's caller treats a document it
+		// cannot decode as a reason to show the stored settings instead.
+		return ko.Get(key)
+	}
+}
+
+// list reads key as a list, accepting the single comma-separated string an
+// environment variable is limited to expressing.
+//
+// koanf does not split such a value, so Strings() on it yields nothing. The
+// same convention is read the same way at runtime by oidcusers.Normalise, which
+// exists for this reason.
+func list(ko *koanf.Koanf, key string) []string {
+	if raw, ok := ko.Get(key).([]any); ok {
+		out := make([]string, 0, len(raw))
+		for _, element := range raw {
+			out = append(out, fmt.Sprintf("%v", element))
+		}
+
+		return out
+	}
+
+	out := []string{}
+	for _, part := range strings.Split(ko.String(key), ",") {
+		if part = strings.TrimSpace(part); part != "" {
+			out = append(out, part)
+		}
+	}
+
+	return out
 }

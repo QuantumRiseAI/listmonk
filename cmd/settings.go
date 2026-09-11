@@ -138,10 +138,19 @@ func (a *App) effectiveSettings(s *models.Settings) ([]string, error) {
 
 	envcfg.Effective(doc, ko, keys)
 
-	if err := remarshal(doc, s); err != nil {
-		a.log.Printf("error encoding settings: %v", err)
-		return nil, echo.NewHTTPError(http.StatusInternalServerError, a.i18n.Ts("globals.messages.internalError"))
+	// Decoded into a fresh value and only then assigned, so that a key whose
+	// environment form does not fit the settings type degrades to showing the
+	// stored values rather than failing the whole page or leaving s half
+	// written. Every environment value is a string and the overlay converts them
+	// by the type already in the document, which cannot cover a shape nothing
+	// delivers by environment yet.
+	var overlaid models.Settings
+	if err := remarshal(doc, &overlaid); err != nil {
+		a.log.Printf("error applying env over settings, showing stored values: %v", err)
+		return keys, nil
 	}
+
+	*s = overlaid
 
 	return keys, nil
 }
