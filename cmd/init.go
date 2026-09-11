@@ -107,14 +107,21 @@ type Config struct {
 	} `koanf:"privacy"`
 	Security struct {
 		OIDC struct {
-			Enabled           bool   `koanf:"enabled"`
-			ProviderURL       string `koanf:"provider_url"`
-			ProviderName      string `koanf:"provider_name"`
-			ClientID          string `koanf:"client_id"`
-			ClientSecret      string `koanf:"client_secret"`
-			AutoCreateUsers   bool   `koanf:"auto_create_users"`
-			DefaultUserRoleID int    `koanf:"default_user_role_id"`
-			DefaultListRoleID int    `koanf:"default_list_role_id"`
+			Enabled         bool   `koanf:"enabled"`
+			ProviderURL     string `koanf:"provider_url"`
+			ProviderName    string `koanf:"provider_name"`
+			ClientID        string `koanf:"client_id"`
+			ClientSecret    string `koanf:"client_secret"`
+			AutoCreateUsers bool   `koanf:"auto_create_users"`
+
+			// Addresses that may be created on first sign-in even with
+			// auto_create_users off. This is what makes SSO usable as the only
+			// login: without it a fresh install has no user, and creating one
+			// needs a user. Accepts a list or a comma-separated string, since
+			// an environment variable can only be the latter.
+			AutoCreateEmails  []string `koanf:"auto_create_emails"`
+			DefaultUserRoleID int      `koanf:"default_user_role_id"`
+			DefaultListRoleID int      `koanf:"default_list_role_id"`
 		} `koanf:"oidc"`
 
 		Captcha struct {
