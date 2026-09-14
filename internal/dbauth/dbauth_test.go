@@ -9,6 +9,7 @@ import (
 
 	"github.com/Azure/azure-sdk-for-go/sdk/azcore"
 	"github.com/Azure/azure-sdk-for-go/sdk/azcore/policy"
+	"github.com/lib/pq"
 )
 
 // A port nothing listens on, so a connection attempt fails immediately once
@@ -187,5 +188,109 @@ func TestOpenWithCredentialPingsBeforeReturning(t *testing.T) {
 
 	if cred.calls == 0 {
 		t.Error("openWithCredential() returned before attempting a connection")
+	}
+}
+
+// The DSN is parsed the way libpq parses it, not by splitting on whitespace.
+//
+// db.params is appended to the assembled DSN verbatim, so every spelling libpq
+// accepts is reachable by configuration — and the two below defeated the check
+// completely, passing a DSN that libpq then connected with in cleartext.
+func TestEffectiveSSLModeMatchesLibpqGrammar(t *testing.T) {
+	const base = "host=db user=listmonk-mi dbname=listmonk"
+
+	for _, tc := range []struct {
+		name string
+		dsn  string
+		want string
+	}{
+		{"plain", base + " sslmode=require", "require"},
+		{"last wins", base + " sslmode=require sslmode=disable", "disable"},
+
+		// libpq skips whitespace before and after the '=', so this IS an
+		// sslmode. Splitting on whitespace saw the tokens `sslmode`, `=` and
+		// `disable`, found no "=" to cut on, and reported the earlier value.
+		{"spaces around =", base + " sslmode=require sslmode = disable", "disable"},
+		{"space before =", base + " sslmode =disable", "disable"},
+		{"space after =", base + " sslmode= disable", "disable"},
+
+		// Inside a quoted value there is no sslmode at all. Splitting on
+		// whitespace found the bare `sslmode=require` in the middle of somebody
+		// else's value and believed it.
+		{"quoted value hiding one", base + " sslmode=disable application_name='x sslmode=require'", "disable"},
+		{"quoted sslmode", base + " sslmode='verify-full'", "verify-full"},
+
+		{"escaped quote in a value", base + ` application_name='a\'b' sslmode=require`, "require"},
+		{"uppercase value", base + " sslmode=REQUIRE", "require"},
+		{"absent", base, ""},
+		{"empty trailing value", base + " sslmode=", ""},
+	} {
+		got, err := effectiveSSLMode(tc.dsn)
+		if err != nil {
+			t.Errorf("%s: effectiveSSLMode(%q): %v", tc.name, tc.dsn, err)
+
+			continue
+		}
+
+		if got != tc.want {
+			t.Errorf("%s: effectiveSSLMode(%q) = %q, want %q", tc.name, tc.dsn, got, tc.want)
+		}
+	}
+}
+
+// The two spellings above, through the check that actually gates startup.
+func TestRequireEncryptedDSNIsNotDefeatedBySpelling(t *testing.T) {
+	const base = "host=db user=listmonk-mi dbname=listmonk"
+
+	for _, tc := range []struct {
+		name string
+		dsn  string
+	}{
+		{"sslmode disabled with spaces", base + " sslmode=require sslmode = disable"},
+		{"sslmode hidden in a quoted value", base + " sslmode=disable application_name='x sslmode=require'"},
+	} {
+		if err := RequireEncryptedDSN(tc.dsn); err == nil {
+			t.Errorf("%s: %q was accepted; libpq would connect in cleartext", tc.name, tc.dsn)
+		}
+	}
+}
+
+// A DSN that cannot be parsed has an unknown effective sslmode, and libpq is
+// about to parse it for real. Refusing beats assuming it was fine.
+func TestRequireEncryptedDSNFailsClosedOnAMalformedDSN(t *testing.T) {
+	for _, dsn := range []string{
+		"host=db sslmode=require application_name='unterminated",
+		"host=db sslmode=require bareword",
+	} {
+		if err := RequireEncryptedDSN(dsn); err == nil {
+			t.Errorf("%q was accepted despite not parsing", dsn)
+		}
+	}
+}
+
+// dsnOptions is a port of lib/pq's parseOpts, so it has to agree with lib/pq
+// about what parses at all — otherwise the check would be reasoning about a
+// DSN different from the one the driver connects with, which is exactly the
+// class of bug it replaces.
+//
+// Asserted against the real driver rather than against a description of it, so
+// a future lib/pq that changes its grammar fails here rather than silently
+// reopening the gap.
+func TestDSNOptionsAgreesWithLibpq(t *testing.T) {
+	for _, dsn := range []string{
+		"host=db sslmode=require",
+		"host=db sslmode = require",
+		"host=db application_name='x sslmode=require' sslmode=require",
+		`host=db application_name='a\'b' sslmode=require`,
+		"host=db sslmode=",
+		"host=db sslmode=require application_name='unterminated",
+		"host=db sslmode=require bareword",
+	} {
+		_, err := dsnOptions(dsn)
+		_, pqErr := pq.NewConnector(dsn)
+
+		if (err == nil) != (pqErr == nil) {
+			t.Errorf("%q: dsnOptions err = %v, but lib/pq err = %v", dsn, err, pqErr)
+		}
 	}
 }
