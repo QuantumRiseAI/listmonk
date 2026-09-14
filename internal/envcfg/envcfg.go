@@ -41,6 +41,17 @@ const Prefix = "LISTMONK_"
 // Delim is the key delimiter koanf is configured with.
 const Delim = "."
 
+// Flat settings keys that `omitempty` drops from the document when what is
+// stored is empty, so that their absence has to be read as "stored empty"
+// rather than "not a settings key".
+//
+// Enumerated because nothing in the document distinguishes them. The list
+// elements' passwords are tagged the same way in models.Settings but are
+// reached structurally, by applyIndexed, and need no entry here.
+var omitemptyKeys = map[string]bool{
+	"upload.s3.aws_secret_access_key": true,
+}
+
 // Matches a key addressing one element of a list, e.g. `smtp.0.password` or
 // `bounce.mailboxes.1.host`. The section is everything before the index, so a
 // nested section works without being enumerated.
@@ -305,6 +316,15 @@ func Effective(doc map[string]any, ko *koanf.Koanf, keys []string) {
 			continue
 		}
 
+		// A flat key `omitempty` elided because what is stored is empty. Absent
+		// for that reason is not the same as absent because the settings
+		// document does not carry the key at all, which is what the skip at the
+		// bottom is for, and only an enumerated key can tell the two apart.
+		if omitemptyKeys[key] {
+			doc[key] = ko.String(key)
+			continue
+		}
+
 		if m := indexedKeyRe.FindStringSubmatch(key); m != nil {
 			applyIndexed(doc, ko, slices, m)
 			continue
@@ -358,7 +378,23 @@ func applyIndexed(doc map[string]any, ko *koanf.Koanf, slices map[string][]*koan
 		return
 	}
 
-	element[field] = valueLike(element[field], running[index], field)
+	existing, present := element[field]
+	if !present {
+		// Absent from the document rather than null in it. `omitempty` elides
+		// an empty value, and every field it is set on in models.Settings is a
+		// credential STRING — smtp, messengers and bounce.mailboxes all tag
+		// their password that way — so a string is what belongs here.
+		//
+		// An empty stored password is the normal state for a deployment that
+		// supplies it from the environment, which made this the common path
+		// rather than an edge: inferring a type for it instead put a number
+		// where the struct has a string whenever the password was all digits,
+		// and one failed decode discards the whole overlay.
+		element[field] = running[index].String(field)
+		return
+	}
+
+	element[field] = valueLike(existing, running[index], field)
 }
 
 // nestedField resolves key against the document's object blocks, returning the
