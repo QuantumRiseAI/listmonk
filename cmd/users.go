@@ -361,11 +361,40 @@ func cacheUsers(co *core.Core, a *auth.Auth) (bool, error) {
 			apiUsers = append(apiUsers, u)
 		}
 
-		if u.Type == auth.UserTypeUser {
+		if isLoginUser(u) {
 			hasUser = true
 		}
 	}
 
 	a.CacheAPIUsers(apiUsers)
 	return hasUser, nil
+}
+
+// isLoginUser reports whether u is a user who can sign in to the admin UI.
+//
+// API users are excluded: they authenticate on a header, never reach the login
+// routes, and their existence does not mean the instance has been set up.
+func isLoginUser(u auth.User) bool {
+	return u.Type == auth.UserTypeUser
+}
+
+// hasLoginUser reports whether the instance has any user who can sign in.
+//
+// Read from the database rather than from App.needsUserSetup, which is a
+// startup snapshot. The first-time setup route creates a Super Admin without
+// authentication and must decide on what is true now, not on what was true when
+// the process started.
+func hasLoginUser(co *core.Core) (bool, error) {
+	users, err := co.GetUsers()
+	if err != nil {
+		return false, err
+	}
+
+	for _, u := range users {
+		if isLoginUser(u) {
+			return true, nil
+		}
+	}
+
+	return false, nil
 }

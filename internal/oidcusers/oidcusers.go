@@ -37,20 +37,31 @@ func Normalise(raw []string) []string {
 	return out
 }
 
+// Unverified reports whether the provider explicitly marked the address as not
+// verified.
+//
+// verified is the email_verified claim, nil when the provider did not send one,
+// and nil is NOT unverified: Entra does not emit the claim for work accounts,
+// so treating its absence as a refusal would turn every sign-in there away.
+//
+// Its own function because it applies to every sign-in rather than only to the
+// one that creates an account. Matching on an address the provider declines to
+// stand behind is how someone reaches an EXISTING user, which is the more
+// valuable target of the two — and was the case not being asked.
+func Unverified(verified *bool) bool {
+	return verified != nil && !*verified
+}
+
 // ShouldCreate reports whether a first-time sign-in by this address may be
 // turned into a user.
 //
-// verified is the provider's email_verified claim, nil when it did not send
-// one. An address the provider explicitly marks UNVERIFIED never creates an
-// account, whichever switch is on: the whole mechanism rests on the address
-// identifying a person, and a provider that permits self-asserted addresses
-// would otherwise let anyone claim one on the list. That narrows
-// autoCreateAll slightly, deliberately, and only where a provider says so.
-//
-// nil is treated as permitted, because Entra does not emit the claim for work
-// accounts and requiring it outright would refuse every sign-in there.
+// An address the provider explicitly marks unverified never creates an account,
+// whichever switch is on: the whole mechanism rests on the address identifying
+// a person, and a provider that permits self-asserted addresses would otherwise
+// let anyone claim one on the list. That narrows autoCreateAll slightly,
+// deliberately, and only where a provider says so.
 func ShouldCreate(email string, verified *bool, autoCreateAll bool, allowlist []string) bool {
-	if verified != nil && !*verified {
+	if Unverified(verified) {
 		return false
 	}
 
