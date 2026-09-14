@@ -73,3 +73,42 @@ func TestShouldCreateDefaultsToNobody(t *testing.T) {
 		t.Error("ShouldCreate() = true with no allowlist and auto-create off")
 	}
 }
+
+// The email_verified refusal used to live only in ShouldCreate, so it was asked
+// only when the sign-in would create an account. An address the provider marks
+// unverified that matches an EXISTING user went straight through to a session —
+// the valuable case, and the unguarded one.
+func TestUnverified(t *testing.T) {
+	yes, no := true, false
+
+	for _, tc := range []struct {
+		name     string
+		verified *bool
+		want     bool
+	}{
+		// Entra does not emit the claim for work accounts, so absence must not
+		// be a refusal or every sign-in there is turned away.
+		{"not sent", nil, false},
+		{"verified", &yes, false},
+		{"explicitly unverified", &no, true},
+	} {
+		if got := Unverified(tc.verified); got != tc.want {
+			t.Errorf("%s: Unverified = %v, want %v", tc.name, got, tc.want)
+		}
+	}
+}
+
+// ShouldCreate keeps refusing what Unverified refuses, since the address not
+// identifying a person is a reason not to create an account as well as a reason
+// not to sign one in.
+func TestShouldCreateStillRefusesUnverified(t *testing.T) {
+	no := false
+
+	if ShouldCreate("a@example.test", &no, true, nil) {
+		t.Error("an unverified address was created under auto_create_users")
+	}
+
+	if ShouldCreate("a@example.test", &no, false, []string{"a@example.test"}) {
+		t.Error("an unverified address was created off the allowlist")
+	}
+}

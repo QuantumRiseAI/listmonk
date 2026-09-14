@@ -267,6 +267,18 @@ func (a *App) OIDCFinish(c echo.Context) error {
 	email = strings.ToLower(em.Address)
 	claims.Email = email
 
+	// An address the provider declines to stand behind signs nobody in.
+	//
+	// Checked HERE rather than beside the creation decision below, because the
+	// account it would otherwise reach is an existing one — and on a deployment
+	// where disable_password_login has made SSO the only door, that is a
+	// takeover of whatever the address already is, up to and including the
+	// Super Admin. Refusing only to create a fresh, low-privilege account
+	// guarded the cheaper of the two.
+	if oidcusers.Unverified(claims.EmailVerified) {
+		return a.renderLoginPage(c, echo.NewHTTPError(http.StatusUnauthorized, a.i18n.T("users.oidcUnverifiedEmail")))
+	}
+
 	// Get the user by e-mail received from OIDC.
 	user, userErr := a.core.GetUser(0, "", email)
 	if userErr != nil {
@@ -483,8 +495,23 @@ func (a *App) createOIDCUser(claims auth.OIDCclaim, c echo.Context) (auth.User, 
 		ListRoleID:    listRoleID,
 		Status:        auth.UserStatusEnabled,
 	})
+	if err != nil {
+		return user, err
+	}
 
-	return user, err
+	// The instance now has a user, so first-time setup is over.
+	//
+	// Without this the flag stays true until the next restart, and LoginPage
+	// tests it BEFORE anything else — so every later visitor gets the setup
+	// form, which renders no SSO button, on a deployment where SSO is the only
+	// way in. The security consequence is handled in doFirstTimeSetup, which no
+	// longer trusts this flag; what is left here is that the login page has to
+	// stop being the setup page.
+	a.Lock()
+	a.needsUserSetup = false
+	a.Unlock()
+
+	return user, nil
 }
 
 // doLogin logs a user in with a username and password.
@@ -542,6 +569,38 @@ func (a *App) doLogin(c echo.Context) error {
 
 // doFirstTimeSetup sets a user up for the first time.
 func (a *App) doFirstTimeSetup(c echo.Context) error {
+	// Refuse once the instance has a user, whoever made it.
+	//
+	// This route takes no authentication, is deliberately exempt from
+	// security.disable_password_login, and ends by creating a Super Admin WITH
+	// a password and signing them in. All of that rests on it being reachable
+	// only while no user exists — and nothing checked that. The needsUserSetup
+	// flag gating it is computed once at startup and cleared in exactly one
+	// place, here, so a first user created any other way left it true and this
+	// route open for the life of the process.
+	//
+	// The other way is the point: the OIDC allowlist exists precisely so that
+	// the first user arrives by SSO. On the deployment this fork is for — fresh
+	// install, password login off, allowlisted SSO — the intended bootstrap
+	// left an unauthenticated Super Admin factory running behind it.
+	//
+	// Asked of the database rather than of the flag, so the premise is enforced
+	// rather than assumed.
+	has, err := hasLoginUser(a.core)
+	if err != nil {
+		return err
+	}
+
+	if has {
+		// The flag was stale, which is why this request got here. Correct it so
+		// the login page stops offering setup.
+		a.Lock()
+		a.needsUserSetup = false
+		a.Unlock()
+
+		return echo.NewHTTPError(http.StatusForbidden, a.i18n.T("users.setupAlreadyDone"))
+	}
+
 	var (
 		email     = strings.TrimSpace(c.FormValue("email"))
 		username  = strings.TrimSpace(c.FormValue("username"))
