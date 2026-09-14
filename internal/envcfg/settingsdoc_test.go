@@ -113,6 +113,59 @@ func TestEffectiveAgainstTheRealSettingsStruct(t *testing.T) {
 	}
 }
 
+// `json:"password,omitempty"` drops an empty password from the document
+// entirely, and an empty stored password is the NORMAL state for a deployment
+// that supplies it from the environment.
+//
+// So the overlay has to fill a field that is absent rather than null. Guessing
+// a type for it put a number where the struct has a string whenever the
+// password was all digits, and one failed decode discards the whole overlay —
+// leaving every env-managed field showing its stale database value behind a
+// tooltip claiming the environment supplies it.
+func TestEffectiveFillsOmitemptyCredentials(t *testing.T) {
+	var stored models.Settings
+	if err := json.Unmarshal([]byte(`{
+		"upload.s3.aws_secret_access_key": "",
+		"smtp": [{"host": "smtp.yoursite.com", "port": 25, "password": ""}]
+	}`), &stored); err != nil {
+		t.Fatalf("decoding the stored settings: %v", err)
+	}
+
+	doc := map[string]any{}
+	remarshal(t, stored, &doc)
+
+	// The premise: both are gone from the marshalled document.
+	if _, ok := doc["upload.s3.aws_secret_access_key"]; ok {
+		t.Error("the S3 secret is present; this test no longer tests anything")
+	}
+
+	if _, ok := doc["smtp"].([]any)[0].(map[string]any)["password"]; ok {
+		t.Error("the SMTP password is present; this test no longer tests anything")
+	}
+
+	running := koanf.New(Delim)
+	if err := running.Load(confmap.Provider(map[string]any{
+		// All digits, which is what turned a wrong type into a wrong document.
+		"smtp":                            []any{map[string]any{"password": "8675309"}},
+		"upload.s3.aws_secret_access_key": "9876543210",
+	}, Delim), nil); err != nil {
+		t.Fatalf("loading the running config: %v", err)
+	}
+
+	Effective(doc, running, []string{"smtp.0.password", "upload.s3.aws_secret_access_key"})
+
+	var overlaid models.Settings
+	remarshal(t, doc, &overlaid)
+
+	if got := overlaid.SMTP[0].Password; got != "8675309" {
+		t.Errorf("smtp[0].password = %q, want the environment's value as a string", got)
+	}
+
+	if got := overlaid.UploadS3AwsSecretAccessKey; got != "9876543210" {
+		t.Errorf("upload.s3.aws_secret_access_key = %q", got)
+	}
+}
+
 // remarshal is what cmd/settings.go does to get between the struct and the
 // dotted document, and back.
 func remarshal(t *testing.T, from any, to any) {
