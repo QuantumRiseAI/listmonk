@@ -43,7 +43,7 @@
           </b-tab-item><!-- media -->
 
           <b-tab-item :label="$t('settings.smtp.name')">
-            <smtp-settings :form="form" :key="key" />
+            <smtp-settings :form="form" :env-managed-keys="envManagedKeys" :key="key" />
           </b-tab-item><!-- mail servers -->
 
           <b-tab-item :label="$t('settings.bounces.name')">
@@ -75,6 +75,37 @@ import PerformanceSettings from './settings/performance.vue';
 import PrivacySettings from './settings/privacy.vue';
 import SecuritySettings from './settings/security.vue';
 import SmtpSettings from './settings/smtp.vue';
+
+// Input names for settings keys whose field is not named after the key.
+//
+// Every tab but security names its inputs for the settings key, which is what
+// lockEnvManagedFields matches on. Security names them for the field —
+// `oidc.client_id` rather than `security.oidc.client_id` — so without this
+// table the whole OIDC block stays editable however the environment sets it.
+//
+// Mapped here rather than renamed there, to keep the fork's diff out of a file
+// upstream still edits.
+const FIELD_NAMES = {
+  'security.oidc.enabled': ['security.oidc'],
+  'security.oidc.provider_url': ['oidc.provider_url'],
+  'security.oidc.provider_name': ['oidc.provider_name'],
+  'security.oidc.client_id': ['oidc.client_id'],
+  'security.oidc.client_secret': ['oidc.client_secret'],
+  'security.oidc.auto_create_users': ['oidc.auto_create_users'],
+  'security.oidc.default_user_role_id': ['oidc.default_user_role_id'],
+  'security.oidc.default_list_role_id': ['oidc.default_list_role_id'],
+
+  // The master switch is a computed proxy over both providers' `enabled`, and
+  // the radios choose between them, so either flag being env-set makes both
+  // controls futile.
+  'security.captcha.altcha.enabled': ['security.captcha', 'captcha_provider'],
+  'security.captcha.hcaptcha.enabled': ['security.captcha', 'captcha_provider'],
+  'security.captcha.altcha.complexity': ['altcha_complexity'],
+  'security.captcha.hcaptcha.key': ['hcaptcha_key'],
+  'security.captcha.hcaptcha.secret': ['hcaptcha_secret'],
+
+  'security.trusted_urls': ['trusted_urls'],
+};
 
 export default Vue.extend({
   components: {
@@ -225,6 +256,20 @@ export default Vue.extend({
       return false;
     },
 
+    // Undo lockEnvManagedFields, so that a re-render cannot leave a disabled
+    // input sitting against a block it was not disabled for.
+    unlockEnvManagedFields() {
+      if (!this.$el.querySelectorAll) {
+        return;
+      }
+
+      this.$el.querySelectorAll('.env-managed').forEach((el) => {
+        el.removeAttribute('disabled');
+        el.removeAttribute('title');
+        el.classList.remove('env-managed');
+      });
+    },
+
     // Disable the inputs for settings the environment supplies.
     //
     // Done against the rendered DOM rather than by passing a prop into each of
@@ -244,7 +289,7 @@ export default Vue.extend({
         // `smtp.0.password` names one field of one block in a list section.
         const m = key.match(/^([^.]+)\.(\d+)\.(.+)$/);
         if (!m) {
-          plain.add(key);
+          (FIELD_NAMES[key] || [key]).forEach((name) => plain.add(name));
           return;
         }
 
@@ -362,6 +407,17 @@ export default Vue.extend({
       // Tab panels render lazily, so fields on a tab that has never been opened
       // do not exist to be disabled until now.
       this.$nextTick(() => {
+        this.lockEnvManagedFields();
+      });
+    },
+
+    // Adding or removing an SMTP block renders the list again, and its v-for is
+    // keyed by index, so Vue reuses the DOM of block n for whatever block now
+    // sits at n. A `disabled` set outside Vue survives that reuse and would end
+    // up against the wrong server.
+    'form.smtp.length': function smtpBlockCount() {
+      this.$nextTick(() => {
+        this.unlockEnvManagedFields();
         this.lockEnvManagedFields();
       });
     },

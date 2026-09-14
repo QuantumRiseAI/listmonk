@@ -530,7 +530,17 @@ func (a *App) TestSMTPSettings(c echo.Context) error {
 	// read, point host at a listener of their own, and collect the resolved
 	// value from the AUTH exchange. Here the caller chooses neither the host nor
 	// the password; both come from the running configuration.
-	if live, ok := a.liveSMTPServer(ko.String("uuid")); ok {
+	//
+	// The index is the form's position for this block, and names the running one
+	// when it carries no UUID. -1 rather than 0 when it is absent, because koanf
+	// cannot tell a missing key from a zero and block 0 is what a wrong guess
+	// would reach.
+	index := -1
+	if ko.Exists("index") {
+		index = ko.Int("index")
+	}
+
+	if live, ok := a.liveSMTPServer(ko.String("uuid"), index); ok {
 		live.EmailHeaders = req.EmailHeaders
 		req = live
 	}
@@ -575,16 +585,15 @@ func (a *App) GetAboutInfo(c echo.Context) error {
 	return c.JSON(http.StatusOK, out)
 }
 
-// liveSMTPServer returns the running configuration for the SMTP block with this
-// UUID, when the environment is what supplies it.
+// liveSMTPServer returns the running configuration for the SMTP block the
+// request names, when the environment is what supplies that block.
 //
-// Matched by UUID rather than by position because the UUID is the only stable
-// identity an SMTP block has: it is assigned once, stored in the database, and
-// survives blocks being reordered or removed in the admin UI. The environment
-// overrides fields within a block and never the UUID, so the block the form is
-// testing and the block the app is running are the same row.
-func (a *App) liveSMTPServer(uuid string) (email.Server, bool) {
-	if uuid == "" || !ko.Bool("app.env_overrides_settings") {
+// Which block that is, and whether the environment manages it, is
+// envcfg.ManagedElement's to decide — the identity rules are subtle enough to
+// be worth testing, and this package cannot be tested at all, its init()
+// reading config.toml and connecting to the database.
+func (a *App) liveSMTPServer(uuid string, index int) (email.Server, bool) {
+	if !ko.Bool("app.env_overrides_settings") {
 		return email.Server{}, false
 	}
 
@@ -594,35 +603,20 @@ func (a *App) liveSMTPServer(uuid string) (email.Server, bool) {
 		return email.Server{}, false
 	}
 
-	managed := false
-	for _, key := range keys {
-		if strings.HasPrefix(key, "smtp"+envcfg.Delim) {
-			managed = true
-			break
-		}
-	}
-
-	if !managed {
+	block, ok := envcfg.ManagedElement(ko, keys, "smtp", uuid, index)
+	if !ok {
 		return email.Server{}, false
 	}
 
-	for _, block := range ko.Slices("smtp") {
-		if block.String("uuid") != uuid {
-			continue
-		}
-
-		var srv email.Server
-		if err := block.UnmarshalWithConf("", &srv, koanf.UnmarshalConf{Tag: "json"}); err != nil {
-			a.log.Printf("error reading live SMTP config: %v", err)
-			return email.Server{}, false
-		}
-
-		// The password is a reference in exactly the deployment this exists for,
-		// and resolving it is the app's own privilege rather than the caller's.
-		srv.Password = resolveSecret(srv.Password)
-
-		return srv, true
+	var srv email.Server
+	if err := block.UnmarshalWithConf("", &srv, koanf.UnmarshalConf{Tag: "json"}); err != nil {
+		a.log.Printf("error reading live SMTP config: %v", err)
+		return email.Server{}, false
 	}
 
-	return email.Server{}, false
+	// The password is a reference in exactly the deployment this exists for,
+	// and resolving it is the app's own privilege rather than the caller's.
+	srv.Password = resolveSecret(srv.Password)
+
+	return srv, true
 }

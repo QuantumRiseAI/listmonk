@@ -272,6 +272,14 @@ export default Vue.extend({
     form: {
       type: Object, default: () => { },
     },
+
+    // Settings keys the environment supplies, as dotted paths
+    // (`smtp.0.password`). Needed here, and not only for the field locking the
+    // parent does, because a block the environment manages is tested against
+    // the running configuration rather than against the form.
+    envManagedKeys: {
+      type: Array, default: () => [],
+    },
   },
 
   data() {
@@ -332,7 +340,7 @@ export default Vue.extend({
     },
 
     doSMTPTest(item, n) {
-      if (!this.isTestEnabled(item)) {
+      if (!this.isTestEnabled(item, n)) {
         this.$utils.toast(this.$t('settings.smtp.testEnterEmail'), 'is-danger');
         this.$nextTick(() => {
           const i = document.querySelector(`.password-${n}`);
@@ -344,7 +352,10 @@ export default Vue.extend({
       }
 
       this.errMsg = '';
-      this.$api.testSMTP({ ...item, email: this.testEmail }).then(() => {
+
+      // The index is how the server finds the running block when the blocks
+      // carry no UUID, which is the case until settings have been saved once.
+      this.$api.testSMTP({ ...item, index: n, email: this.testEmail }).then(() => {
         this.$utils.toast(this.$t('campaigns.testSent'));
       }).catch((err) => {
         if (err.response?.data?.message) {
@@ -363,10 +374,28 @@ export default Vue.extend({
       });
     },
 
-    isTestEnabled(item) {
+    // Whether the environment supplies any part of this block, in which case
+    // the server tests the running configuration instead of what was posted.
+    isEnvManaged(n) {
+      return this.envManagedKeys.some((key) => key.startsWith(`smtp.${n}.`));
+    },
+
+    isTestEnabled(item, n) {
       if (!item.host || !item.port) {
         return false;
       }
+
+      // Asking for the password back is how the test gets one the form does not
+      // hold, since it holds a mask. For an env-managed block there is nothing
+      // to ask for: the password lives in the environment, its input is
+      // disabled precisely because editing it here does nothing, and the server
+      // uses the running value regardless of what is posted. Keeping the check
+      // would leave the button permanently refusing with "Re-enter password to
+      // test" against a field that cannot be typed into.
+      if (this.isEnvManaged(n)) {
+        return true;
+      }
+
       if (item.auth_protocol !== 'none' && item.password.includes('•')) {
         return false;
       }
