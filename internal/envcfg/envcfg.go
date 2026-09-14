@@ -234,12 +234,64 @@ func Keys() ([]string, error) {
 	return keys, nil
 }
 
+// ManagedElement returns the running configuration of the element of a list
+// section — an SMTP block, a bounce mailbox — that uuid or index names, but
+// only when the environment supplies at least one of THAT element's fields.
+//
+// It answers "may I show or use the running values here instead of the ones
+// posted to me", which is a question about one element: with only
+// `smtp.0.password` in the environment, the second block is still the
+// database's.
+//
+// Identified by UUID when the caller has one, because the UUID is the only
+// identity an element keeps across being reordered or removed in the admin UI,
+// and the environment overrides fields within an element and never its UUID.
+//
+// There is not always one. schema.sql seeds the default SMTP blocks with no
+// `uuid` field at all and one is only assigned on the first settings save, so a
+// deployment configured entirely from the environment — the deployment this
+// exists for — may never have acquired any. The index is the fallback, and is
+// the identity the environment itself addresses elements by in
+// `smtp.0.password`. Only when the caller has no UUID, so that a form whose
+// blocks have been reordered cannot reach the wrong element merely because it
+// also sent an index.
+func ManagedElement(ko *koanf.Koanf, keys []string, section, uuid string, index int) (*koanf.Koanf, bool) {
+	elements := ko.Slices(section)
+
+	at := -1
+	if uuid != "" {
+		for i, element := range elements {
+			if element.String("uuid") == uuid {
+				at = i
+				break
+			}
+		}
+	} else if index >= 0 && index < len(elements) {
+		at = index
+	}
+
+	if at < 0 {
+		return nil, false
+	}
+
+	prefix := fmt.Sprintf("%s%s%d%s", section, Delim, at, Delim)
+	for _, key := range keys {
+		if strings.HasPrefix(key, prefix) {
+			return elements[at], true
+		}
+	}
+
+	return nil, false
+}
+
 // Effective overlays, onto a decoded settings document, the values ko holds for
 // the given keys.
 //
 // The document is the settings JSON, whose top-level keys are themselves dotted
 // ("app.root_url" is one key, not two levels), except for list sections like
-// "smtp" which hold arrays. Those two shapes are the only ones settings use.
+// "smtp" which hold arrays and a few blocks — "security.oidc",
+// "security.captcha" — which hold objects. Those three shapes are the only ones
+// settings use.
 func Effective(doc map[string]any, ko *koanf.Koanf, keys []string) {
 	// List sections are read through Slices, not by indexed path. koanf holds a
 	// list as one value, so ko.Get("smtp.0.host") is nil however the list got
@@ -253,42 +305,101 @@ func Effective(doc map[string]any, ko *koanf.Koanf, keys []string) {
 			continue
 		}
 
-		m := indexedKeyRe.FindStringSubmatch(key)
-		if m == nil {
-			// A key the settings document does not carry. Config-file-only
-			// settings such as `app.address` and the whole `db` block live in
-			// the environment and never in the database, so this is ordinary.
+		if m := indexedKeyRe.FindStringSubmatch(key); m != nil {
+			applyIndexed(doc, ko, slices, m)
 			continue
 		}
 
-		section, field := m[1], m[3]
-
-		index, err := strconv.Atoi(m[2])
-		if err != nil {
+		// A block key. `security.oidc` is ONE settings key whose value is an
+		// object, so `security.oidc.enabled` is not in the document at any
+		// level either branch above looks at.
+		//
+		// Without this, every OIDC and captcha value the environment supplied
+		// was dropped on the floor and the form showed the database's stale
+		// copy instead — a deployment whose OIDC was configured entirely from
+		// the environment displayed as switched off.
+		if block, field, ok := nestedField(doc, key); ok {
+			block[field] = valueLike(block[field], ko, key)
 			continue
 		}
 
-		list, ok := doc[section].([]any)
-		if !ok || index >= len(list) {
-			continue
-		}
+		// A key the settings document does not carry. Config-file-only settings
+		// such as `app.address` and the whole `db` block live in the
+		// environment and never in the database, so this is ordinary.
+	}
+}
 
-		element, ok := list[index].(map[string]any)
+// applyIndexed overlays a key naming one field of one element of a list
+// section, e.g. `smtp.0.password`, from the submatch indexedKeyRe produced.
+func applyIndexed(doc map[string]any, ko *koanf.Koanf, slices map[string][]*koanf.Koanf, m []string) {
+	section, field := m[1], m[3]
+
+	index, err := strconv.Atoi(m[2])
+	if err != nil {
+		return
+	}
+
+	list, ok := doc[section].([]any)
+	if !ok || index >= len(list) {
+		return
+	}
+
+	element, ok := list[index].(map[string]any)
+	if !ok {
+		return
+	}
+
+	if _, ok := slices[section]; !ok {
+		slices[section] = ko.Slices(section)
+	}
+
+	running := slices[section]
+	if index >= len(running) {
+		return
+	}
+
+	element[field] = valueLike(element[field], running[index], field)
+}
+
+// nestedField resolves key against the document's object blocks, returning the
+// map that directly holds the key's last segment, and that segment.
+//
+// The longest top-level key that prefixes the environment key names the block,
+// and what remains addresses a field within it. Longest first, so that a
+// document carrying both "security" and "security.oidc" resolves to the more
+// specific one; and a block may nest again, as "security.captcha" does into
+// "altcha" and "hcaptcha".
+func nestedField(doc map[string]any, key string) (map[string]any, string, bool) {
+	for cut := strings.LastIndex(key, Delim); cut > 0; cut = strings.LastIndex(key[:cut], Delim) {
+		block, ok := doc[key[:cut]].(map[string]any)
 		if !ok {
 			continue
 		}
 
-		if _, ok := slices[section]; !ok {
-			slices[section] = ko.Slices(section)
+		path := strings.Split(key[cut+len(Delim):], Delim)
+		for _, segment := range path[:len(path)-1] {
+			next, ok := block[segment].(map[string]any)
+			if !ok {
+				return nil, "", false
+			}
+
+			block = next
 		}
 
-		running := slices[section]
-		if index >= len(running) {
-			continue
+		field := path[len(path)-1]
+		if _, ok := block[field]; !ok {
+			// The document is marshalled from the settings struct, so every
+			// field it has is present. One that is not is a key the struct does
+			// not declare — a typo, or a config-file-only setting that happens
+			// to sit under a block — and inventing it would only fail the
+			// decode that puts the document back.
+			return nil, "", false
 		}
 
-		element[field] = valueLike(element[field], running[index], field)
+		return block, field, true
 	}
+
+	return nil, "", false
 }
 
 // valueLike reads key from ko as the type the settings document already
@@ -308,12 +419,42 @@ func valueLike(existing any, ko *koanf.Koanf, key string) any {
 		return list(ko, key)
 	case string:
 		return ko.String(key)
+	case nil:
+		// A setting that is null when unset, which is how the `null.Int` roles
+		// under security.oidc marshal. Leaving the environment's string in
+		// place of one would fail the decode and discard the whole overlay, so
+		// the type has to be guessed — see infer.
+		return infer(ko.String(key))
 	default:
-		// null, or a nested object. Nothing delivers one of those by
-		// environment today, and Effective's caller treats a document it
-		// cannot decode as a reason to show the stored settings instead.
+		// A nested object. Nothing delivers one of those whole by environment
+		// today, and Effective's caller treats a document it cannot decode as a
+		// reason to show the stored settings instead.
 		return ko.Get(key)
 	}
+}
+
+// infer reads a value whose intended type the settings document does not state,
+// because what it holds there is null.
+//
+// JSON's own spelling is the best guide available, and the case this exists for
+// is narrow: security.oidc.default_user_role_id and its list counterpart are
+// `null.Int`, they are exactly what an OIDC-only deployment sets from the
+// environment, and they decode from a number but not from "2".
+func infer(raw string) any {
+	if raw == "" {
+		return nil
+	}
+
+	// Before ParseBool, which would take "1" and "0" as booleans.
+	if n, err := strconv.ParseFloat(raw, 64); err == nil {
+		return n
+	}
+
+	if b, err := strconv.ParseBool(raw); err == nil {
+		return b
+	}
+
+	return raw
 }
 
 // list reads key as a list, accepting the single comma-separated string an

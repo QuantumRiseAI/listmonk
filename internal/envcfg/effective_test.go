@@ -7,6 +7,7 @@ import (
 
 	"github.com/knadh/koanf/providers/confmap"
 	"github.com/knadh/koanf/v2"
+	"gopkg.in/volatiletech/null.v6"
 )
 
 // The settings document is the JSON shape models.Settings marshals to: top
@@ -96,6 +97,95 @@ func TestEffectiveOverlaysWhatIsRunning(t *testing.T) {
 	second, _ := list[1].(map[string]any)
 	if got := second["host"]; got != "second.example" {
 		t.Errorf("smtp.1.host = %v, want it left alone", got)
+	}
+}
+
+// A few settings keys hold an object rather than a value, so the field the
+// environment names is not a key of the document at any level the flat lookup
+// or the indexed one reaches.
+//
+// This shipped broken: an OIDC deployment configured entirely from the
+// environment displayed as switched off, because `security.oidc.enabled` was
+// looked for beside `app.root_url` instead of inside `security.oidc`.
+func TestEffectiveOverlaysNestedBlocks(t *testing.T) {
+	ko := koanf.New(Delim)
+
+	// Strings, as the environment provider yields them.
+	if err := ko.Load(confmap.Provider(map[string]any{
+		"security.oidc.enabled":              "true",
+		"security.oidc.client_id":            "listmonk-prod",
+		"security.oidc.default_user_role_id": "2",
+		"security.captcha.altcha.complexity": "50000",
+	}, Delim), nil); err != nil {
+		t.Fatalf("loading: %v", err)
+	}
+
+	doc := map[string]any{
+		"app.site_name": "listmonk",
+		"security.oidc": map[string]any{
+			"enabled":              false,
+			"client_id":            "",
+			"default_user_role_id": nil,
+		},
+		"security.captcha": map[string]any{
+			"altcha": map[string]any{"complexity": float64(300000)},
+		},
+	}
+
+	Effective(doc, ko, []string{
+		"security.oidc.enabled",
+		"security.oidc.client_id",
+		"security.oidc.default_user_role_id",
+		"security.captcha.altcha.complexity",
+		// Not a field the struct declares. Adding it would only fail the decode
+		// that puts the document back.
+		"security.oidc.nonsense",
+	})
+
+	oidc, _ := doc["security.oidc"].(map[string]any)
+	if got := oidc["enabled"]; got != true {
+		t.Errorf("security.oidc.enabled = %#v, want the bool true", got)
+	}
+
+	if got := oidc["client_id"]; got != "listmonk-prod" {
+		t.Errorf("security.oidc.client_id = %#v", got)
+	}
+
+	// `null.Int` when unset, and it decodes from a number but not from "2".
+	if got := oidc["default_user_role_id"]; got != float64(2) {
+		t.Errorf("security.oidc.default_user_role_id = %#v, want a number", got)
+	}
+
+	if _, ok := oidc["nonsense"]; ok {
+		t.Error("an undeclared field was added to the settings document")
+	}
+
+	captcha, _ := doc["security.captcha"].(map[string]any)
+	altcha, _ := captcha["altcha"].(map[string]any)
+	if got := altcha["complexity"]; got != float64(50000) {
+		t.Errorf("security.captcha.altcha.complexity = %#v", got)
+	}
+
+	// The whole point, again: it has to decode back into the typed struct.
+	var into struct {
+		OIDC struct {
+			Enabled           bool     `json:"enabled"`
+			ClientID          string   `json:"client_id"`
+			DefaultUserRoleID null.Int `json:"default_user_role_id"`
+		} `json:"security.oidc"`
+	}
+
+	b, err := json.Marshal(doc)
+	if err != nil {
+		t.Fatalf("marshal: %v", err)
+	}
+
+	if err := json.Unmarshal(b, &into); err != nil {
+		t.Fatalf("decoding the overlaid document: %v", err)
+	}
+
+	if !into.OIDC.Enabled || into.OIDC.DefaultUserRoleID.Int != 2 {
+		t.Errorf("decoded = %+v", into.OIDC)
 	}
 }
 
