@@ -15,9 +15,11 @@ import (
 	"context"
 	"database/sql"
 	"database/sql/driver"
+	"errors"
 	"fmt"
 	"strings"
 	"time"
+	"unicode"
 
 	"github.com/Azure/azure-sdk-for-go/sdk/azcore"
 	"github.com/Azure/azure-sdk-for-go/sdk/azcore/policy"
@@ -161,7 +163,13 @@ var encryptingSSLModes = map[string]bool{
 // passing while the connection is in fact cleartext — defeating this check
 // with configuration rather than by evading it.
 func RequireEncryptedDSN(dsn string) error {
-	mode := effectiveSSLMode(dsn)
+	mode, err := effectiveSSLMode(dsn)
+	if err != nil {
+		// Fails CLOSED. A DSN this cannot parse is one whose effective sslmode
+		// is unknown, and libpq is about to parse it for real; refusing beats
+		// guessing that it was probably fine.
+		return fmt.Errorf("cannot determine the database DSN's sslmode: %w", err)
+	}
 
 	if mode == "" {
 		return fmt.Errorf("no sslmode in the database DSN, which libpq treats as %q and allows falling "+
@@ -181,17 +189,125 @@ func RequireEncryptedDSN(dsn string) error {
 
 // effectiveSSLMode returns the sslmode libpq would actually use: the LAST one
 // in the DSN, since later keys win.
-func effectiveSSLMode(dsn string) string {
-	mode := ""
+func effectiveSSLMode(dsn string) (string, error) {
+	opts, err := dsnOptions(dsn)
+	if err != nil {
+		return "", err
+	}
 
-	for _, field := range strings.Fields(dsn) {
-		key, value, found := strings.Cut(field, "=")
-		if found && strings.EqualFold(strings.TrimSpace(key), "sslmode") {
-			mode = strings.ToLower(strings.Trim(strings.TrimSpace(value), "'\""))
+	return strings.ToLower(strings.TrimSpace(opts["sslmode"])), nil
+}
+
+// dsnOptions parses a libpq keyword/value connection string the way libpq does.
+//
+// A port of lib/pq's parseOpts, because the approximation it replaces —
+// strings.Fields then strings.Cut on "=" — agreed with libpq only on the
+// spelling everybody writes, and missed both of libpq's own allowances:
+//
+//	sslmode = disable                       whitespace around the '='
+//	application_name='x sslmode=require'    a quoted value
+//
+// On the first, Cut found no "sslmode=" token at all, so a DSN ENDING in
+// `sslmode = disable` still reported whatever sslmode came earlier. On the
+// second, it found a bare `sslmode=require` inside somebody else's quoted
+// value and believed it. Either way RequireEncryptedDSN passed a connection
+// that libpq then made in cleartext, putting the Entra token — a bearer
+// credential, replayable for its lifetime against a server that by definition
+// accepts tokens — on the wire.
+//
+// Both spellings are reachable through db.params, which is appended to the DSN
+// verbatim. So the check was defeated by configuration rather than by evasion,
+// which is the distinction it exists to hold.
+func dsnOptions(dsn string) (map[string]string, error) {
+	var (
+		opts  = map[string]string{}
+		runes = []rune(dsn)
+		i     = 0
+	)
+
+	skipSpaces := func() {
+		for i < len(runes) && unicode.IsSpace(runes[i]) {
+			i++
 		}
 	}
 
-	return mode
+	// Consumes the escaped character a backslash introduces, which libpq
+	// honours inside a quoted value and out.
+	unescape := func() error {
+		if runes[i] != '\\' {
+			return nil
+		}
+
+		if i++; i >= len(runes) {
+			return errors.New("missing character after a backslash")
+		}
+
+		return nil
+	}
+
+	for {
+		skipSpaces()
+		if i >= len(runes) {
+			return opts, nil
+		}
+
+		// The key runs to whitespace or to the '='.
+		start := i
+		for i < len(runes) && !unicode.IsSpace(runes[i]) && runes[i] != '=' {
+			i++
+		}
+
+		key := string(runes[start:i])
+
+		skipSpaces()
+		if i >= len(runes) || runes[i] != '=' {
+			return nil, fmt.Errorf("missing %q after %q", "=", key)
+		}
+
+		i++
+
+		skipSpaces()
+		if i >= len(runes) {
+			// libpq reads a trailing `key=` as an empty value.
+			opts[key] = ""
+
+			return opts, nil
+		}
+
+		var value []rune
+
+		if runes[i] == '\'' {
+			for i++; ; i++ {
+				if i >= len(runes) {
+					return nil, errors.New("unterminated quoted value")
+				}
+
+				if runes[i] == '\'' {
+					i++
+
+					break
+				}
+
+				if err := unescape(); err != nil {
+					return nil, err
+				}
+
+				value = append(value, runes[i])
+			}
+		} else {
+			for ; i < len(runes) && !unicode.IsSpace(runes[i]); i++ {
+				if err := unescape(); err != nil {
+					return nil, err
+				}
+
+				value = append(value, runes[i])
+			}
+		}
+
+		// Last wins, which is libpq's own behaviour and the reason this looks
+		// at the assembled DSN rather than at db.ssl_mode.
+		opts[key] = string(value)
+	}
 }
 
 // NormaliseMode canonicalises the configured auth mode, defaulting to password
