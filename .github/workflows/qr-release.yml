@@ -100,15 +100,31 @@ jobs:
         run: |
           set -euo pipefail
 
+          # Read through a redirect rather than `strings ... | grep -q`.
+          #
+          # In a pipeline, grep -q exits the moment it matches, strings takes
+          # SIGPIPE writing the rest of a 25MB binary, and `pipefail` makes the
+          # pipeline's status that 141 — so the step FAILED precisely when the
+          # string was there. Absent, grep exited 1 and it failed too: this
+          # check could not pass, and no release has ever reached the registry
+          # through it. A redirect from a process substitution takes its status
+          # from grep alone.
+          require_string() {
+            if ! grep -qF "$1" < <(strings ./listmonk); then
+              echo "::error::the packed binary does not contain '$1'" >&2
+              exit 1
+            fi
+          }
+
           # The Go half is linked. This scope string exists nowhere but
           # internal/dbauth, so finding it in the binary proves the package was
           # compiled in — which grepping the config sample does not.
-          strings ./listmonk | grep -q 'ossrdbms-aad.database.windows.net'
+          require_string 'ossrdbms-aad.database.windows.net'
 
           # And the secret-reference resolver. A separate string from a separate
           # package, because the check above proves only the database patch and
           # would pass a build that silently lacked this one.
-          strings ./listmonk | grep -q 'vault.usgovcloudapi.net'
+          require_string 'vault.usgovcloudapi.net'
 
           # The config surface travels inside the binary. Rendered from a
           # directory holding no config.toml.sample, so the output can only
