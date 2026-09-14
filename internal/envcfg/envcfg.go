@@ -44,7 +44,24 @@ const Delim = "."
 // Matches a key addressing one element of a list, e.g. `smtp.0.password` or
 // `bounce.mailboxes.1.host`. The section is everything before the index, so a
 // nested section works without being enumerated.
-var indexedKeyRe = regexp.MustCompile(`^(.+)\.(\d+)\.(.+)$`)
+//
+// The section is matched NON-GREEDILY, so the index is the FIRST one in the
+// key. Greedy, it was the last: `smtp.0.email_headers.0.x_trace` parsed as
+// section `smtp.0.email_headers`, which no list lives at — and loading that
+// key made koanf replace the whole `smtp` LIST with a map keyed "0", so every
+// SMTP server vanished and no campaign could send, with nothing logged. The
+// list handling in this package exists to prevent exactly that; it was being
+// defeated by the pattern that decides when to apply it.
+var indexedKeyRe = regexp.MustCompile(`^(.+?)\.(\d+)\.(.+)$`)
+
+// Matches a field path that indexes again, e.g. `email_headers.0.x_trace` as
+// the remainder of `smtp.0.email_headers.0.x_trace`.
+//
+// Nothing addresses a list inside a list element by environment today, and
+// merging one would need a second level of the same logic. Such a key is
+// dropped rather than guessed at: what it must not do is reach koanf and take
+// the enclosing list with it.
+var nestedIndexRe = regexp.MustCompile(`(^|\.)\d+(\.|$)`)
 
 // transform maps an environment variable name onto a koanf key.
 //
@@ -102,6 +119,32 @@ func Reapply(ko *koanf.Koanf) error {
 		existing[section] = rawSlices(ko, section)
 	}
 
+	// Split what the settings already hold as a list.
+	//
+	// An environment variable can only be one string, and koanf does not split
+	// it: loaded over a stored array, `ko.Strings` on the result yields NOTHING.
+	// Before the environment was authoritative the database's array won and
+	// this could not arise; now the string lands on top, and the list settings
+	// read that way — upload.extensions, privacy.domain_blocklist,
+	// privacy.domain_allowlist, privacy.exportable, app.notify_emails — all
+	// silently became empty. An empty extension list rejects every upload and
+	// an empty blocklist stops blocking, neither with an error.
+	//
+	// Decided by what is STORED there rather than by whether the value contains
+	// a comma, so that a plain string setting whose value happens to have one
+	// is left alone. It is the same convention `list` reads for the settings
+	// form, which was already splitting these correctly and so displayed them
+	// as working while the running config had lost them.
+	for key, value := range plain {
+		if _, ok := ko.Get(key).([]any); !ok {
+			continue
+		}
+
+		if raw, ok := value.(string); ok {
+			plain[key] = splitList(raw)
+		}
+	}
+
 	if len(plain) > 0 {
 		if err := ko.Load(confmap.Provider(plain, Delim), nil); err != nil {
 			return fmt.Errorf("error applying env over settings: %w", err)
@@ -144,6 +187,13 @@ func partition(all map[string]any) (map[string]any, map[string]map[int]map[strin
 		}
 
 		section, idx, rest := m[1], m[2], m[3]
+
+		// A list inside a list element, which this does not merge. Dropping the
+		// key loses an override nothing offers today; keeping it cost the whole
+		// enclosing list.
+		if nestedIndexRe.MatchString(rest) {
+			continue
+		}
 
 		// The regex guarantees digits, so this cannot fail.
 		i, _ := strconv.Atoi(idx)
@@ -473,8 +523,22 @@ func list(ko *koanf.Koanf, key string) []string {
 		return out
 	}
 
+	return splitList(ko.String(key))
+}
+
+// splitList reads the one comma-separated string an environment variable is
+// limited to expressing as the list it means.
+//
+// Shared by `list`, which shows these in the settings form, and by Reapply,
+// which puts them into the running configuration. They disagreed until the
+// second one existed: the form split the value and the app did not, so a
+// blocklist displayed as two entries while blocking nothing.
+//
+// The same convention is read the same way again by oidcusers.Normalise, which
+// additionally lowercases because it compares addresses.
+func splitList(raw string) []string {
 	out := []string{}
-	for _, part := range strings.Split(ko.String(key), ",") {
+	for _, part := range strings.Split(raw, ",") {
 		if part = strings.TrimSpace(part); part != "" {
 			out = append(out, part)
 		}
