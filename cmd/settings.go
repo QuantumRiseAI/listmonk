@@ -18,6 +18,7 @@ import (
 	"github.com/gofrs/uuid/v5"
 	"github.com/jmoiron/sqlx/types"
 	koanfjson "github.com/knadh/koanf/parsers/json"
+	"github.com/knadh/koanf/providers/confmap"
 	"github.com/knadh/koanf/providers/rawbytes"
 	"github.com/knadh/koanf/v2"
 	"github.com/knadh/listmonk/internal/auth"
@@ -136,7 +137,13 @@ func (a *App) effectiveSettings(s *models.Settings) ([]string, error) {
 		return nil, echo.NewHTTPError(http.StatusInternalServerError, a.i18n.Ts("globals.messages.internalError"))
 	}
 
-	envcfg.Effective(doc, ko, keys)
+	// Narrowed to what the overlay could actually place. The environment holds
+	// far more than the settings table does — db.password, secrets.azure_client_id,
+	// and on Kubernetes a service link like LISTMONK_PORT — and this list is
+	// handed to every settings:get holder and used to disable form fields by
+	// name. Naming a key that is not a setting leaked the variable's existence
+	// and disabled whatever input happened to share its name.
+	applied := envcfg.Effective(doc, ko, keys)
 
 	// Decoded into a fresh value and only then assigned, so that a key whose
 	// environment form does not fit the settings type degrades to showing the
@@ -147,12 +154,69 @@ func (a *App) effectiveSettings(s *models.Settings) ([]string, error) {
 	var overlaid models.Settings
 	if err := remarshal(doc, &overlaid); err != nil {
 		a.log.Printf("error applying env over settings, showing stored values: %v", err)
-		return keys, nil
+		return applied, nil
 	}
 
 	*s = overlaid
 
-	return keys, nil
+	return applied, nil
+}
+
+// restoreEnvManaged puts the stored value back into set for every setting the
+// environment supplies, so that saving cannot write the environment into the
+// settings table.
+//
+// GetSettings shows the RUNNING configuration and the admin UI posts the whole
+// document back, so without this an admin who edits one unrelated field
+// persists every env-supplied value. They then outlive the variable that set
+// them: remove it and the app keeps running the old value out of the database.
+//
+// Fails the request rather than writing what it could not correct. A save that
+// silently persisted the environment is the bug; doing it anyway because the
+// correction failed would be the same bug with a log line.
+func (a *App) restoreEnvManaged(set *models.Settings, cur models.Settings) error {
+	if !ko.Bool("app.env_overrides_settings") {
+		return nil
+	}
+
+	keys, err := envcfg.Keys()
+	if err != nil {
+		a.log.Printf("error reading env keys: %v", err)
+		return echo.NewHTTPError(http.StatusInternalServerError, a.i18n.Ts("globals.messages.internalError"))
+	}
+
+	// The settings table as a koanf, so Restore can address it by the same
+	// dotted paths the environment uses — the shape the running config already
+	// has, which is what makes the two halves share their addressing.
+	storedDoc := map[string]any{}
+	if err := remarshal(cur, &storedDoc); err != nil {
+		a.log.Printf("error decoding stored settings: %v", err)
+		return echo.NewHTTPError(http.StatusInternalServerError, a.i18n.Ts("globals.messages.internalError"))
+	}
+
+	stored := koanf.New(envcfg.Delim)
+	if err := stored.Load(confmap.Provider(storedDoc, envcfg.Delim), nil); err != nil {
+		a.log.Printf("error reading stored settings: %v", err)
+		return echo.NewHTTPError(http.StatusInternalServerError, a.i18n.Ts("globals.messages.internalError"))
+	}
+
+	doc := map[string]any{}
+	if err := remarshal(set, &doc); err != nil {
+		a.log.Printf("error decoding posted settings: %v", err)
+		return echo.NewHTTPError(http.StatusInternalServerError, a.i18n.Ts("globals.messages.internalError"))
+	}
+
+	envcfg.Restore(doc, stored, keys)
+
+	var restored models.Settings
+	if err := remarshal(doc, &restored); err != nil {
+		a.log.Printf("error restoring env-managed settings: %v", err)
+		return echo.NewHTTPError(http.StatusInternalServerError, a.i18n.Ts("globals.messages.internalError"))
+	}
+
+	*set = restored
+
+	return nil
 }
 
 // settingsWithEnvKeys renders settings as the document the UI consumes, with the
@@ -198,6 +262,13 @@ func (a *App) UpdateSettings(c echo.Context) error {
 	// Get the existing settings.
 	cur, err := a.core.GetSettings()
 	if err != nil {
+		return err
+	}
+
+	// Put the stored values back wherever the environment supplies one, BEFORE
+	// any of the normalisation below reads them, so that the rest of this
+	// handler works on what will actually be written.
+	if err := a.restoreEnvManaged(&set, cur); err != nil {
 		return err
 	}
 

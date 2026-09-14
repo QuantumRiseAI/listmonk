@@ -180,3 +180,87 @@ func remarshal(t *testing.T, from any, to any) {
 		t.Fatalf("unmarshal: %v", err)
 	}
 }
+
+// Restore is what stops a settings save persisting the environment.
+//
+// The form is shown the RUNNING configuration and the admin UI posts the whole
+// document back, so without this an admin editing one unrelated field wrote
+// every env-supplied value into the settings table — where it outlived the
+// variable that set it.
+func TestRestorePutsTheStoredValuesBack(t *testing.T) {
+	// What the settings table holds.
+	var stored models.Settings
+	if err := json.Unmarshal([]byte(`{
+		"app.site_name": "listmonk",
+		"app.root_url": "http://localhost:9000",
+		"security.oidc": {"enabled": false, "client_id": "", "provider_url": ""},
+		"smtp": [{"host": "smtp.yoursite.com", "port": 25, "password": "stored"}]
+	}`), &stored); err != nil {
+		t.Fatalf("decoding the stored settings: %v", err)
+	}
+
+	storedDoc := map[string]any{}
+	remarshal(t, stored, &storedDoc)
+
+	storedKo := koanf.New(Delim)
+	if err := storedKo.Load(confmap.Provider(storedDoc, Delim), nil); err != nil {
+		t.Fatalf("loading the stored settings: %v", err)
+	}
+
+	// What the admin posts back: the running values, with one unrelated edit.
+	var posted models.Settings
+	if err := json.Unmarshal([]byte(`{
+		"app.site_name": "Newsletter",
+		"app.root_url": "https://news.example.test",
+		"security.oidc": {"enabled": true, "client_id": "listmonk-prod",
+		                  "provider_url": "https://login.microsoftonline.com/tid/v2.0"},
+		"smtp": [{"host": "smtp.azurecomm.net", "port": 587, "password": ""}]
+	}`), &posted); err != nil {
+		t.Fatalf("decoding the posted settings: %v", err)
+	}
+
+	doc := map[string]any{}
+	remarshal(t, posted, &doc)
+
+	applied := Restore(doc, storedKo, []string{
+		"app.root_url",
+		"security.oidc.enabled",
+		"security.oidc.client_id",
+		"security.oidc.provider_url",
+		"smtp.0.host",
+		"smtp.0.port",
+		// In the environment but not a setting, so it must neither be written
+		// nor reported as applied.
+		"db.password",
+	})
+
+	var out models.Settings
+	remarshal(t, doc, &out)
+
+	if out.AppRootURL != "http://localhost:9000" {
+		t.Errorf("app.root_url = %q, want the stored value", out.AppRootURL)
+	}
+
+	if out.OIDC.Enabled || out.OIDC.ClientID != "" || out.OIDC.ProviderURL != "" {
+		t.Errorf("security.oidc = %+v, want the stored values", out.OIDC)
+	}
+
+	if out.SMTP[0].Host != "smtp.yoursite.com" || out.SMTP[0].Port != 25 {
+		t.Errorf("smtp[0] = %s:%d, want the stored values", out.SMTP[0].Host, out.SMTP[0].Port)
+	}
+
+	// The edit the admin actually made is not env-managed and must survive.
+	if out.AppSiteName != "Newsletter" {
+		t.Errorf("app.site_name = %q, want the admin's edit kept", out.AppSiteName)
+	}
+
+	for _, key := range applied {
+		if key == "db.password" {
+			t.Error("db.password was reported as an applied settings key")
+		}
+	}
+
+	if len(applied) != 6 {
+		t.Errorf("applied = %v, want the six that are settings keys", applied)
+	}
+}
