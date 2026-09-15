@@ -340,9 +340,36 @@ var (
 	secretResolver     *secrets.Resolver
 )
 
+// resolveSecret dereferences a secret reference at STARTUP, where a failure is
+// fatal.
+//
+// Fatal rather than falling back to the reference, which would be sent as a
+// password and fail somewhere far less legible. That is the right answer while
+// the process is coming up and no answer at all once it is serving: see
+// tryResolveSecret, which every request path must use instead.
 func resolveSecret(value string) string {
+	resolved, err := tryResolveSecret(value)
+	if err != nil {
+		lo.Fatalf("%v", err)
+	}
+
+	return resolved
+}
+
+// tryResolveSecret dereferences a secret reference, reporting failure instead
+// of ending the process.
+//
+// Needed because a reference is not necessarily resolved at startup, so a
+// request can be the first thing to dereference one: initSMTPMessengers skips
+// disabled blocks BEFORE resolving, so a disabled server's reference never
+// enters the resolver's cache, and the admin UI's "Test connection" will then
+// reach the vault for the first time from inside an HTTP handler. With the
+// startup behaviour, a vault that answered 403 or 429 at that moment took
+// listmonk down mid-request — dropping in-flight campaign sends, public
+// subscription pages and bounce webhooks — because somebody clicked a button.
+func tryResolveSecret(value string) (string, error) {
 	if !secrets.IsReference(value) {
-		return value
+		return value, nil
 	}
 
 	secretResolverOnce.Do(func() {
@@ -352,14 +379,7 @@ func resolveSecret(value string) string {
 		)
 	})
 
-	resolved, err := secretResolver.Resolve(context.Background(), value)
-	if err != nil {
-		// Fatal rather than falling back to the reference, which would be sent
-		// as a password and fail somewhere far less legible.
-		lo.Fatalf("%v", err)
-	}
-
-	return resolved
+	return secretResolver.Resolve(context.Background(), value)
 }
 
 // initDB initializes the main DB connection pool and parse and loads the app's

@@ -581,6 +581,7 @@
     "settings.smtp.heloHostHelp": "Optional. Some SMTP servers require a FQDN in the hostname. By default, HELLOs go with `localhost`. Set this if a custom hostname should be used.",
     "settings.smtp.name": "SMTP",
     "settings.smtp.retries": "Retries",
+    "settings.smtp.errorResolvingSecret": "Could not read this server's password from the configured secret store. Check the server logs.",
     "settings.smtp.retriesHelp": "Number of times to retry when a message fails.",
     "settings.smtp.retryDelay": "Retry delay",
     "settings.smtp.retryDelayHelp": "Time to wait before retrying after an error (s for second, m for minute). 0s disables the delay.",
