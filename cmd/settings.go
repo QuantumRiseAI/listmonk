@@ -445,6 +445,23 @@ func (a *App) UpdateSettings(c echo.Context) error {
 		set.OIDC.ClientSecret = cur.OIDC.ClientSecret
 	}
 
+	// Refuse a save that would leave no way to sign in.
+	//
+	// security.disable_password_login is config-only and security.oidc.enabled
+	// is a settings row, so this switch is the one thing the admin UI can do
+	// that makes the instance unstartable. assertALoginPathExists turns it into
+	// a fatal — and not once: the row is still there on the next start, and the
+	// one after, so the container exits in a loop with campaigns, the public
+	// archive and the bounce endpoints all down, recoverable only by an UPDATE
+	// on the settings table, since the admin UI is what has gone.
+	//
+	// Caught here instead, where it is one rejected save and the instance keeps
+	// running. The assert stays as the backstop for a row that arrives any
+	// other way.
+	if ko.Bool("security.disable_password_login") && !set.OIDC.Enabled {
+		return echo.NewHTTPError(http.StatusBadRequest, a.i18n.T("settings.errorNoLoginPath"))
+	}
+
 	// OIDC user auto-creation is enabled. Validate.
 	if set.OIDC.AutoCreateUsers {
 		if set.OIDC.DefaultUserRoleID.Int < auth.SuperAdminRoleID {
