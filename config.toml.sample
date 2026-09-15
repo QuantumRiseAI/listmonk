@@ -106,6 +106,18 @@ azure_use_default_credential_chain = false
 # exists at all and there would otherwise be no way to create the first one.
 disable_password_login = false
 
+[security.oidc]
+# NOTE the section header. This setting is `security.oidc.auto_create_emails`,
+# so under [security] it would become `security.auto_create_emails`, which
+# nothing reads — the allowlist would then refuse everybody, silently, which on
+# a deployment where SSO is the only way in means nobody can sign in at all.
+#
+# The rest of the OIDC settings — enabled, client_id, provider_url and the
+# client secret — live in the settings table and are edited in the admin UI,
+# not here. Putting them in this section has no effect unless
+# app.env_overrides_settings is on, because the settings table loads after this
+# file and wins.
+
 # Addresses that may be created as users on their first SSO sign-in, even with
 # security.oidc.auto_create_users off.
 #

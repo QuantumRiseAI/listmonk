@@ -1,6 +1,7 @@
 package envcfg
 
 import (
+	"reflect"
 	"testing"
 
 	"github.com/knadh/koanf/providers/confmap"
@@ -166,5 +167,46 @@ func TestReapplyWithNoEnvChangesNothing(t *testing.T) {
 	slices := ko.Slices("smtp")
 	if len(slices) != 1 || slices[0].String("host") != "smtp.example.org" {
 		t.Errorf("smtp list was disturbed: %d elements", len(slices))
+	}
+}
+
+// koanf's own Strings returns nothing for a comma-separated value, which is the
+// only shape an environment variable can take — while the struct unmarshal that
+// reads the same settings into the app's config lifts it to one element and
+// then splits it.
+//
+// A caller reading with ko.Strings therefore saw an empty list where the
+// feature saw values, which is how assertOIDCUserCreationIsSane came to be a
+// no-op for exactly the deployment it was written for.
+func TestStringsReadsBothSpellings(t *testing.T) {
+	ko := koanf.New(Delim)
+	if err := ko.Load(confmap.Provider(map[string]any{
+		"from.env":    "a@example.test, b@example.test",
+		"from.toml":   []any{"a@example.test", "b@example.test"},
+		"from.single": "a@example.test",
+		"from.empty":  "",
+	}, Delim), nil); err != nil {
+		t.Fatalf("loading: %v", err)
+	}
+
+	want := []string{"a@example.test", "b@example.test"}
+
+	for _, key := range []string{"from.env", "from.toml"} {
+		if got := Strings(ko, key); !reflect.DeepEqual(got, want) {
+			t.Errorf("Strings(%q) = %#v, want %#v", key, got, want)
+		}
+	}
+
+	if got := Strings(ko, "from.single"); !reflect.DeepEqual(got, []string{"a@example.test"}) {
+		t.Errorf("Strings(from.single) = %#v", got)
+	}
+
+	if got := Strings(ko, "from.empty"); len(got) != 0 {
+		t.Errorf("Strings(from.empty) = %#v, want nothing", got)
+	}
+
+	// The spelling koanf itself cannot read, which is the whole point.
+	if got := ko.Strings("from.env"); len(got) != 0 {
+		t.Logf("koanf now reads a comma string as %#v; this helper may be redundant", got)
 	}
 }
