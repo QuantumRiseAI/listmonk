@@ -584,6 +584,20 @@ func infer(raw string) any {
 	return raw
 }
 
+// Strings reads a setting spelled either as a list or as the single
+// comma-separated string an environment variable is limited to.
+//
+// koanf's own Strings returns NOTHING for the second spelling, while the
+// struct unmarshal that reads the same settings into the app's config lifts it
+// to one element — so a caller reaching for ko.Strings sees an empty list where
+// the feature sees values. That is how assertOIDCUserCreationIsSane came to be
+// a no-op for exactly the deployment it was written for: it read the allowlist
+// as empty, returned early, and let the instance start into the database error
+// it exists to pre-empt.
+func Strings(ko *koanf.Koanf, key string) []string {
+	return list(ko, key)
+}
+
 // list reads key as a list, accepting the single comma-separated string an
 // environment variable is limited to expressing.
 //

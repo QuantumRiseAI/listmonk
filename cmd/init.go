@@ -42,6 +42,7 @@ import (
 	"github.com/knadh/listmonk/internal/captcha"
 	"github.com/knadh/listmonk/internal/core"
 	"github.com/knadh/listmonk/internal/dbauth"
+	"github.com/knadh/listmonk/internal/envcfg"
 	"github.com/knadh/listmonk/internal/i18n"
 	"github.com/knadh/listmonk/internal/manager"
 	"github.com/knadh/listmonk/internal/media"
@@ -624,7 +625,14 @@ func assertALoginPathExists(ko *koanf.Koanf) {
 // message naming nothing useful. Saying so at startup is cheaper than
 // diagnosing that.
 func assertOIDCUserCreationIsSane(ko *koanf.Koanf) {
-	allowlist := oidcusers.Normalise(ko.Strings("security.oidc.auto_create_emails"))
+	// envcfg.Strings, not ko.Strings. koanf's own returns NOTHING for a
+	// comma-separated string, which is the only shape an environment variable
+	// can take — so on an env-configured deployment this read the allowlist as
+	// empty and returned here, while the app itself, which reads the same
+	// setting through a struct unmarshal that tolerates the string, went on to
+	// create users from it. The guard was dead for precisely the deployment it
+	// was written for.
+	allowlist := oidcusers.Normalise(envcfg.Strings(ko, "security.oidc.auto_create_emails"))
 	if len(allowlist) == 0 {
 		return
 	}
