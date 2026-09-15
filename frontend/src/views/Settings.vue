@@ -43,15 +43,15 @@
           </b-tab-item><!-- media -->
 
           <b-tab-item :label="$t('settings.smtp.name')">
-            <smtp-settings :form="form" :env-managed-keys="envManagedKeys" :key="key" />
+            <smtp-settings ref="smtpTab" :form="form" :env-managed-keys="envManagedKeys" :key="key" />
           </b-tab-item><!-- mail servers -->
 
           <b-tab-item :label="$t('settings.bounces.name')">
-            <bounce-settings :form="form" :key="key" />
+            <bounce-settings ref="bouncesTab" :form="form" :key="key" />
           </b-tab-item><!-- bounces -->
 
           <b-tab-item :label="$t('settings.messengers.name')">
-            <messenger-settings :form="form" :key="key" />
+            <messenger-settings ref="messengersTab" :form="form" :key="key" />
           </b-tab-item><!-- messengers -->
 
           <b-tab-item :label="$t('settings.appearance.name')">
@@ -105,6 +105,15 @@ const FIELD_NAMES = {
   'security.captcha.hcaptcha.secret': ['hcaptcha_secret'],
 
   'security.trusted_urls': ['trusted_urls'],
+};
+
+// Settings sections that hold a list, and the ref of the tab component that
+// renders one. All three are addressed by the environment as `<section>.N.field`
+// and all three are overlaid by the backend, so all three have to lock.
+const LIST_SECTIONS = {
+  smtp: 'smtpTab',
+  'bounce.mailboxes': 'bouncesTab',
+  messengers: 'messengersTab',
 };
 
 export default Vue.extend({
@@ -270,6 +279,51 @@ export default Vue.extend({
       });
     },
 
+    // Keep the locks applied across re-renders.
+    //
+    // The attribute is set outside Vue, and on several of these inputs Vue owns
+    // it: smtp.vue binds :disabled="item.auth_protocol === 'none'" on username
+    // and password, so changing the auth protocol makes Vue REMOVE the
+    // attribute, taking the lock with it. Others sit behind v-if — security.vue
+    // mounts the hcaptcha key and secret only for that provider, and the whole
+    // captcha block only when enabled — so toggling either renders fresh,
+    // unlocked inputs. Neither the tab watcher nor the SMTP-count watcher fires
+    // for any of that, and the field went on showing "set by the environment"
+    // while being perfectly editable.
+    observeRerenders() {
+      // Only worth running at all when something is env-managed, which for most
+      // deployments is never — so this costs them nothing.
+      if (this.lockObserver || !this.envManagedKeys.length) {
+        return;
+      }
+
+      if (!window.MutationObserver || !this.$el || !this.$el.querySelectorAll) {
+        return;
+      }
+
+      this.lockObserver = new MutationObserver(() => {
+        this.$nextTick(() => this.lockEnvManagedFields());
+      });
+
+      this.startObserving();
+    },
+
+    startObserving() {
+      if (this.lockObserver) {
+        // `disabled` only: every other attribute change is Vue's business, and
+        // watching them all would rerun this on every keystroke.
+        this.lockObserver.observe(this.$el, {
+          childList: true, subtree: true, attributes: true, attributeFilter: ['disabled'],
+        });
+      }
+    },
+
+    stopObserving() {
+      if (this.lockObserver) {
+        this.lockObserver.disconnect();
+      }
+    },
+
     // Disable the inputs for settings the environment supplies.
     //
     // Done against the rendered DOM rather than by passing a prop into each of
@@ -277,17 +331,29 @@ export default Vue.extend({
     // Every input already carries name="<settings key>", which is the mapping
     // this needs, and the alternative is an edit to every field in the form for
     // a case most deployments never hit.
+    //
+    // This is advisory, not a boundary: the form posts this.form rather than
+    // the DOM, so a disabled input is no guarantee. What makes an env-managed
+    // value safe is the server putting the stored one back on write.
     lockEnvManagedFields() {
       if (!this.envManagedKeys.length || !this.$el.querySelectorAll) {
         return;
       }
 
+      // Our own attribute writes would otherwise re-enter through the observer.
+      this.stopObserving();
+
       const plain = new Set();
       const lists = {};
 
       this.envManagedKeys.forEach((key) => {
-        // `smtp.0.password` names one field of one block in a list section.
-        const m = key.match(/^([^.]+)\.(\d+)\.(.+)$/);
+        // `smtp.0.password` names one field of one block in a list section, and
+        // `bounce.mailboxes.0.password` does the same for a DOTTED section.
+        // Matched non-greedily, and allowing dots in the section, so that this
+        // agrees with envcfg's own indexedKeyRe: requiring a dotless section
+        // meant every bounce.mailboxes key fell through to the plain set,
+        // matched no input, and locked nothing at all.
+        const m = key.match(/^(.+?)\.(\d+)\.(.+)$/);
         if (!m) {
           (FIELD_NAMES[key] || [key]).forEach((name) => plain.add(name));
           return;
@@ -314,21 +380,34 @@ export default Vue.extend({
         }
       });
 
-      // Only SMTP is mapped. Bounce boxes and messengers are list sections too,
-      // but nothing delivers their credentials by environment today; add the
-      // container selector here when something does.
-      Object.entries(lists.smtp || {}).forEach(([index, fields]) => {
-        const block = this.$el.querySelectorAll('.mail-servers > .block')[index];
-        if (!block) {
+      // All three list sections, scoped through the tab component that renders
+      // each. Scoped by ref rather than by a container class because bounce
+      // mailboxes have no wrapping element of their own, and each of these
+      // components renders exactly one `.block.box` — the v-for'd element —
+      // so within a component the index is unambiguous.
+      Object.entries(lists).forEach(([section, blocks]) => {
+        const root = this.$refs[LIST_SECTIONS[section]];
+        if (!root) {
           return;
         }
 
-        block.querySelectorAll('[name]').forEach((el) => {
-          if (fields.has(el.getAttribute('name'))) {
-            disable(el);
+        const elements = root.$el.querySelectorAll('.block.box');
+
+        Object.entries(blocks).forEach(([index, fields]) => {
+          const block = elements[index];
+          if (!block) {
+            return;
           }
+
+          block.querySelectorAll('[name]').forEach((el) => {
+            if (fields.has(el.getAttribute('name'))) {
+              disable(el);
+            }
+          });
         });
       });
+
+      this.startObserving();
     },
 
     getSettings() {
@@ -361,7 +440,15 @@ export default Vue.extend({
         this.formCopy = JSON.stringify(d);
 
         this.$nextTick(() => {
+          // Unlocked first: a re-fetch re-renders the tabs, and a stale lock
+          // left from the previous document could sit against a different block.
+          this.unlockEnvManagedFields();
           this.lockEnvManagedFields();
+
+          // Started here rather than in mounted, because only now is it known
+          // whether anything is env-managed at all.
+          this.observeRerenders();
+
           this.isLoading = false;
         });
       });
@@ -398,6 +485,10 @@ export default Vue.extend({
   mounted() {
     this.tab = this.$utils.getPref('settings.tab') || 0;
     this.getSettings();
+  },
+
+  beforeDestroy() {
+    this.stopObserving();
   },
 
   watch: {
