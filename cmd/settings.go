@@ -540,7 +540,16 @@ func (a *App) TestSMTPSettings(c echo.Context) error {
 		index = ko.Int("index")
 	}
 
-	if live, ok := a.liveSMTPServer(ko.String("uuid"), index); ok {
+	live, ok, err := a.liveSMTPServer(ko.String("uuid"), index)
+	if err != nil {
+		// The reference itself is kept out of the response — the form shows this
+		// password masked, so the caller is not otherwise shown it — and logged
+		// in full instead.
+		return echo.NewHTTPError(http.StatusBadGateway,
+			a.i18n.T("settings.smtp.errorResolvingSecret"))
+	}
+
+	if ok {
 		live.EmailHeaders = req.EmailHeaders
 		req = live
 	}
@@ -592,31 +601,46 @@ func (a *App) GetAboutInfo(c echo.Context) error {
 // envcfg.ManagedElement's to decide — the identity rules are subtle enough to
 // be worth testing, and this package cannot be tested at all, its init()
 // reading config.toml and connecting to the database.
-func (a *App) liveSMTPServer(uuid string, index int) (email.Server, bool) {
+// A failed secret resolution is returned rather than swallowed: falling back to
+// testing the posted form — which for an env-managed block holds a mask and a
+// stale host — would report a failure about the wrong server entirely.
+func (a *App) liveSMTPServer(uuid string, index int) (email.Server, bool, error) {
 	if !ko.Bool("app.env_overrides_settings") {
-		return email.Server{}, false
+		return email.Server{}, false, nil
 	}
 
 	keys, err := envcfg.Keys()
 	if err != nil {
 		a.log.Printf("error reading env keys: %v", err)
-		return email.Server{}, false
+		return email.Server{}, false, nil
 	}
 
 	block, ok := envcfg.ManagedElement(ko, keys, "smtp", uuid, index)
 	if !ok {
-		return email.Server{}, false
+		return email.Server{}, false, nil
 	}
 
 	var srv email.Server
 	if err := block.UnmarshalWithConf("", &srv, koanf.UnmarshalConf{Tag: "json"}); err != nil {
 		a.log.Printf("error reading live SMTP config: %v", err)
-		return email.Server{}, false
+		return email.Server{}, false, nil
 	}
 
 	// The password is a reference in exactly the deployment this exists for,
 	// and resolving it is the app's own privilege rather than the caller's.
-	srv.Password = resolveSecret(srv.Password)
+	//
+	// tryResolveSecret, NOT resolveSecret: the startup one ends the process on a
+	// vault error, and this runs inside a request. A disabled block's reference
+	// is never resolved at boot — initSMTPMessengers skips disabled servers
+	// before resolving — so this click can be the first call to the vault, and a
+	// 403 or a 429 would have taken listmonk down mid-request.
+	password, err := tryResolveSecret(srv.Password)
+	if err != nil {
+		a.log.Printf("error resolving the live SMTP password: %v", err)
+		return email.Server{}, false, err
+	}
 
-	return srv, true
+	srv.Password = password
+
+	return srv, true, nil
 }
