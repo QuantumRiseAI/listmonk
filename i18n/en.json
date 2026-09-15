@@ -425,6 +425,7 @@
     "settings.confirmRestart": "Ensure running campaigns are paused. Restart?",
     "settings.duplicateMessengerName": "Duplicate messenger name: {name}",
     "settings.errorEncoding": "Error encoding settings: {error}",
+    "settings.errorNoLoginPath": "Password login is disabled in the config file, so turning OIDC off would leave no way to sign in. The app would then refuse to start.",
     "settings.errorNoSMTP": "At least one SMTP block should be enabled",
     "settings.general.adminNotifEmails": "Admin notification e-mails",
     "settings.general.adminNotifEmailsHelp": "Comma separated list of e-mail addresses to which admin notifications such as import updates, campaign completion, failure etc. should be sent.",

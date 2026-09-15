@@ -46,9 +46,20 @@ type page struct {
 }
 
 func render(t *testing.T, data loginData) string {
+	return renderTemplate(t, "login.html", "admin-login", data)
+}
+
+// renderSetup renders the FIRST-TIME SETUP page, which is served in place of
+// the login page while no user exists — and therefore has the same two
+// conditions to get right.
+func renderSetup(t *testing.T, data loginData) string {
+	return renderTemplate(t, "login-setup.html", "admin-login-setup", data)
+}
+
+func renderTemplate(t *testing.T, file, name string, data loginData) string {
 	t.Helper()
 
-	path := filepath.Join("..", "..", "static", "public", "templates", "login.html")
+	path := filepath.Join("..", "..", "static", "public", "templates", file)
 
 	// header and footer live in other files and are irrelevant here.
 	tpl := template.Must(template.New("stubs").Parse(
@@ -57,7 +68,7 @@ func render(t *testing.T, data loginData) string {
 	tpl = template.Must(tpl.ParseFiles(path))
 
 	var out strings.Builder
-	if err := tpl.ExecuteTemplate(&out, "admin-login", page{RootURL: "https://example.test", Data: data}); err != nil {
+	if err := tpl.ExecuteTemplate(&out, name, page{RootURL: "https://example.test", Data: data}); err != nil {
 		t.Fatalf("rendering: %v", err)
 	}
 
@@ -116,6 +127,73 @@ func TestLoginPageElementsPerConfiguration(t *testing.T) {
 			// Unconditional: an error is only ever set when there is
 			// something the person signing in needs to read, and the
 			// configuration they are signing in under does not change that.
+			{errorText, true},
+		} {
+			got := strings.Contains(out, check.what)
+			if got != check.want {
+				t.Errorf("%s: %q present = %v, want %v", tc.name, check.what, got, check.want)
+			}
+		}
+	}
+}
+
+// The setup page is served in PLACE of the login page while no user exists, so
+// it carries the same two conditions — and got both wrong.
+//
+// It hardcoded PasswordEnabled and offered no SSO button at all, which meant a
+// fresh install with password login disabled and OIDC configured presented a
+// username-and-password setup form and nothing else. The first user could only
+// be created with a password, on a deployment configured not to allow
+// passwords; SSO could not be used until one existed.
+func TestSetupPageElementsPerConfiguration(t *testing.T) {
+	const (
+		setupForm  = `name="password2"`
+		oidcButton = `action="/auth/oidc"`
+		errorText  = "that username is taken"
+	)
+
+	for _, tc := range []struct {
+		name     string
+		data     loginData
+		password bool
+		oidc     bool
+	}{
+		{
+			// Stock listmonk: no OIDC, so the password form is the only way to
+			// create the first user and must still be there.
+			name:     "password only",
+			data:     loginData{Error: errorText, PasswordEnabled: true},
+			password: true,
+		},
+		{
+			name:     "password and OIDC",
+			data:     loginData{Error: errorText, PasswordEnabled: true, OIDCProvider: "Microsoft"},
+			password: true, oidc: true,
+		},
+		{
+			// What this fork's deployment runs. The button has to be here or
+			// there is no way to create the first user at all.
+			name: "OIDC only",
+			data: loginData{Error: errorText, OIDCProvider: "Microsoft"},
+			oidc: true,
+		},
+		{
+			name: "neither",
+			data: loginData{Error: errorText},
+		},
+	} {
+		out := renderSetup(t, tc.data)
+
+		for _, check := range []struct {
+			what string
+			want bool
+		}{
+			{setupForm, tc.password},
+			{oidcButton, tc.oidc},
+			// Unconditional, and the reason it sits outside both blocks: with
+			// the password form gone, an error nested inside it is invisible —
+			// and the errors this page reports now include the refusal to set
+			// up a second time.
 			{errorText, true},
 		} {
 			got := strings.Contains(out, check.what)

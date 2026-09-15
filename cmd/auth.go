@@ -369,6 +369,67 @@ func (a *App) ResetPage(c echo.Context) error {
 	return a.renderResetPasswordPage(c, token, email, "")
 }
 
+// oidcBranding derives the provider name and logo the SSO button is rendered
+// with, or empty strings when OIDC is off.
+//
+// Shared by the ordinary login page and the first-time setup page, which now
+// also offers the button — written once so the two cannot drift into showing
+// different things for the same provider.
+func (a *App) oidcBranding() (string, string) {
+	if !a.cfg.Security.OIDC.Enabled {
+		return "", ""
+	}
+
+	// Defaults.
+	name, logo := a.cfg.Security.OIDC.ProviderName, "oidc.png"
+
+	u, err := url.Parse(a.cfg.Security.OIDC.ProviderURL)
+	if err != nil {
+		return name, logo
+	}
+
+	// The last two labels are the root domain.
+	h := strings.Split(u.Hostname(), ".")
+
+	prov := u.Hostname()
+	if len(h) >= 2 {
+		prov = h[len(h)-2] + "." + h[len(h)-1]
+	}
+
+	if name == "" {
+		name = prov
+	}
+
+	// Lookup the logo in the known providers map.
+	if _, ok := oidcProviders[prov]; ok {
+		logo = prov + ".png"
+	}
+
+	return name, logo
+}
+
+// setOIDCNonce issues the CSRF nonce that both /auth/oidc routes require, and
+// returns it for the form.
+//
+// Any page offering the SSO button has to set it: without the cookie,
+// OIDCLogin and OIDCFinish both refuse with "invalid request".
+func (a *App) setOIDCNonce(c echo.Context) (string, error) {
+	nonce, err := utils.GenerateRandomString(16)
+	if err != nil {
+		return "", err
+	}
+
+	c.SetCookie(&http.Cookie{
+		Name:     "nonce",
+		Value:    nonce,
+		HttpOnly: true,
+		Path:     "/",
+		SameSite: http.SameSiteLaxMode,
+	})
+
+	return nonce, nil
+}
+
 // renderLoginPage renders the login page and handles the login form.
 func (a *App) renderLoginPage(c echo.Context, loginErr error) error {
 	next := utils.SanitizeURI(c.FormValue("next"))
@@ -376,37 +437,7 @@ func (a *App) renderLoginPage(c echo.Context, loginErr error) error {
 		next = uriAdmin
 	}
 
-	var (
-		oidcProviderName = ""
-		oidcLogo         = ""
-	)
-	if a.cfg.Security.OIDC.Enabled {
-		// Defaults.
-		oidcProviderName = a.cfg.Security.OIDC.ProviderName
-		oidcLogo = "oidc.png"
-
-		u, err := url.Parse(a.cfg.Security.OIDC.ProviderURL)
-		if err == nil {
-			h := strings.Split(u.Hostname(), ".")
-
-			// Get the last two h for the root domain
-			prov := ""
-			if len(h) >= 2 {
-				prov = h[len(h)-2] + "." + h[len(h)-1]
-			} else {
-				prov = u.Hostname()
-			}
-
-			if oidcProviderName == "" {
-				oidcProviderName = prov
-			}
-
-			// Lookup the logo in the known providers map.
-			if _, ok := oidcProviders[prov]; ok {
-				oidcLogo = prov + ".png"
-			}
-		}
-	}
+	oidcProviderName, oidcLogo := a.oidcBranding()
 
 	out := loginTpl{
 		Title:            a.i18n.T("users.login"),
@@ -426,18 +457,11 @@ func (a *App) renderLoginPage(c echo.Context, loginErr error) error {
 	}
 
 	// Generate and set a nonce for preventing CSRF requests that will be valided in the subsequent requests.
-	nonce, err := utils.GenerateRandomString(16)
+	nonce, err := a.setOIDCNonce(c)
 	if err != nil {
 		a.log.Printf("error generating OIDC nonce: %v", err)
 		return echo.NewHTTPError(http.StatusBadRequest, a.i18n.T("globals.messages.internalError"))
 	}
-	c.SetCookie(&http.Cookie{
-		Name:     "nonce",
-		Value:    nonce,
-		HttpOnly: true,
-		Path:     "/",
-		SameSite: http.SameSiteLaxMode,
-	})
 	out.Nonce = nonce
 
 	// Render the login page.
@@ -451,10 +475,39 @@ func (a *App) renderLoginSetupPage(c echo.Context, loginErr error) error {
 		next = uriAdmin
 	}
 
+	// The kill switch covers this page too.
+	//
+	// It was hardcoded true, on the reasoning that the first user has to come
+	// from somewhere — but with OIDC offered below, they can come from there,
+	// which is the whole point of the allowlist. Leaving the password form up
+	// meant a deployment that had switched password login off still presented
+	// one, and anybody could use it to make the first Super Admin.
+	//
+	// If the identity provider is broken, recovery is what it is for the rest
+	// of the kill switch: set security.disable_password_login = false in the
+	// config file and restart.
 	out := loginTpl{
 		Title:           a.i18n.T("users.login"),
-		PasswordEnabled: true,
+		PasswordEnabled: !a.cfg.Security.DisablePasswordLogin,
 		NextURI:         next,
+	}
+
+	// The same OIDC block the ordinary login page renders, because otherwise
+	// the FIRST user cannot arrive by SSO at all: this page is served in place
+	// of that one while no user exists, and it offered no button and set no
+	// nonce — which both /auth/oidc routes require — so an SSO-only install
+	// had to create a password admin here first, on a deployment where password
+	// login is supposedly off.
+	out.OIDCProvider, out.OIDCProviderLogo = a.oidcBranding()
+
+	if a.cfg.Security.OIDC.Enabled {
+		nonce, err := a.setOIDCNonce(c)
+		if err != nil {
+			a.log.Printf("error generating OIDC nonce: %v", err)
+			return echo.NewHTTPError(http.StatusInternalServerError, a.i18n.T("globals.messages.internalError"))
+		}
+
+		out.Nonce = nonce
 	}
 
 	// If there was an error in the previous state (POST reqest), set it to render in the template.
