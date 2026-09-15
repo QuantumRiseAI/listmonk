@@ -303,16 +303,47 @@ func ManagedElement(ko *koanf.Koanf, keys []string, section, uuid string, index 
 // "smtp" which hold arrays and a few blocks — "security.oidc",
 // "security.captcha" — which hold objects. Those three shapes are the only ones
 // settings use.
-func Effective(doc map[string]any, ko *koanf.Koanf, keys []string) {
+// Returns the keys it actually placed, which is a SUBSET: the environment
+// carries plenty that settings do not, and a caller that reports "the
+// environment manages this" should name only what it really reached.
+func Effective(doc map[string]any, ko *koanf.Koanf, keys []string) []string {
+	return overlay(doc, ko, keys)
+}
+
+// Restore puts back, for every key the environment supplies, the value the
+// SETTINGS TABLE holds — undoing on the write path what Effective does on the
+// read path. It returns the same subset.
+//
+// Without it, saving persists the environment. The form is shown the RUNNING
+// configuration and the admin UI posts the whole document back, so an admin who
+// edits one unrelated field writes every env-supplied value into the settings
+// table. Those values then outlive the variable that set them: remove the
+// variable and the app goes on running the old value out of the database, with
+// nothing recording where it came from. That is the inverse of the documented
+// contract — that an admin-UI edit to an env-set key reverts on the next start.
+//
+// Deliberately the same addressing as Effective, and deliberately the same
+// code. A key one could reach and the other could not would be a key that
+// displays as environment-managed and saves as though it were not.
+func Restore(doc map[string]any, stored *koanf.Koanf, keys []string) []string {
+	return overlay(doc, stored, keys)
+}
+
+// overlay copies each key out of ko into doc, as the type doc holds there, and
+// returns the keys it placed.
+func overlay(doc map[string]any, ko *koanf.Koanf, keys []string) []string {
 	// List sections are read through Slices, not by indexed path. koanf holds a
 	// list as one value, so ko.Get("smtp.0.host") is nil however the list got
 	// there — the same quirk that makes Reapply fold indexed keys into slices in
 	// the first place. Cached because a section is usually named by several keys.
 	slices := map[string][]*koanf.Koanf{}
 
+	applied := make([]string, 0, len(keys))
+
 	for _, key := range keys {
 		if existing, ok := doc[key]; ok {
 			doc[key] = valueLike(existing, ko, key)
+			applied = append(applied, key)
 			continue
 		}
 
@@ -322,11 +353,14 @@ func Effective(doc map[string]any, ko *koanf.Koanf, keys []string) {
 		// bottom is for, and only an enumerated key can tell the two apart.
 		if omitemptyKeys[key] {
 			doc[key] = ko.String(key)
+			applied = append(applied, key)
 			continue
 		}
 
 		if m := indexedKeyRe.FindStringSubmatch(key); m != nil {
-			applyIndexed(doc, ko, slices, m)
+			if applyIndexed(doc, ko, slices, m) {
+				applied = append(applied, key)
+			}
 			continue
 		}
 
@@ -340,33 +374,37 @@ func Effective(doc map[string]any, ko *koanf.Koanf, keys []string) {
 		// the environment displayed as switched off.
 		if block, field, ok := nestedField(doc, key); ok {
 			block[field] = valueLike(block[field], ko, key)
+			applied = append(applied, key)
 			continue
 		}
 
 		// A key the settings document does not carry. Config-file-only settings
 		// such as `app.address` and the whole `db` block live in the
-		// environment and never in the database, so this is ordinary.
+		// environment and never in the database, so this is ordinary — and it
+		// is why the caller is given `applied` rather than what it passed in.
 	}
+
+	return applied
 }
 
 // applyIndexed overlays a key naming one field of one element of a list
 // section, e.g. `smtp.0.password`, from the submatch indexedKeyRe produced.
-func applyIndexed(doc map[string]any, ko *koanf.Koanf, slices map[string][]*koanf.Koanf, m []string) {
+func applyIndexed(doc map[string]any, ko *koanf.Koanf, slices map[string][]*koanf.Koanf, m []string) bool {
 	section, field := m[1], m[3]
 
 	index, err := strconv.Atoi(m[2])
 	if err != nil {
-		return
+		return false
 	}
 
 	list, ok := doc[section].([]any)
 	if !ok || index >= len(list) {
-		return
+		return false
 	}
 
 	element, ok := list[index].(map[string]any)
 	if !ok {
-		return
+		return false
 	}
 
 	if _, ok := slices[section]; !ok {
@@ -375,7 +413,7 @@ func applyIndexed(doc map[string]any, ko *koanf.Koanf, slices map[string][]*koan
 
 	running := slices[section]
 	if index >= len(running) {
-		return
+		return false
 	}
 
 	existing, present := element[field]
@@ -391,10 +429,13 @@ func applyIndexed(doc map[string]any, ko *koanf.Koanf, slices map[string][]*koan
 		// where the struct has a string whenever the password was all digits,
 		// and one failed decode discards the whole overlay.
 		element[field] = running[index].String(field)
-		return
+
+		return true
 	}
 
 	element[field] = valueLike(existing, running[index], field)
+
+	return true
 }
 
 // nestedField resolves key against the document's object blocks, returning the
